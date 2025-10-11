@@ -9,6 +9,7 @@ import routes from '../routes';
 import { errorHandler } from '../middleware/errorMiddleware';
 import swaggerSpec from './swagger';
 
+
 const app: Application = express();
 
 // Security middleware with relaxed CSP for documentation

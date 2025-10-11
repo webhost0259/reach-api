@@ -12,6 +12,7 @@
     "test": "jest --coverage",
     "test:watch": "jest --watch",
     "test:api": "ts-node test/test-api.ts",
+    "test:templates": "ts-node test/test-templates.ts",
     "lint": "eslint . --ext .ts --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "type-check": "tsc --noEmit",

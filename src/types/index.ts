@@ -84,3 +84,65 @@ export interface QueueJobData {
   phoneNumber: string;
   content: string;
 }
+
+// Add these to existing types file
+
+export interface MessageTemplate {
+  id: string;
+  user_id: string;
+  name: string;
+  template_code: string;
+  language: string;
+  category: 'marketing' | 'utility' | 'authentication';
+  status: 'pending' | 'approved' | 'rejected';
+  header_type?: 'none' | 'text' | 'image' | 'video' | 'document';
+  header_content?: string;
+  body_text: string;
+  footer_text?: string;
+  buttons?: TemplateButton[];
+  example_values?: string[];
+  rejection_reason?: string;
+  meta_template_id?: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface TemplateButton {
+  type: 'quick_reply' | 'url' | 'phone_number';
+  text: string;
+  url?: string;
+  phone_number?: string;
+}
+
+export interface CreateTemplateRequest {
+  name: string;
+  template_code: string;
+  language?: string;
+  category?: 'marketing' | 'utility' | 'authentication';
+  header_type?: 'none' | 'text' | 'image' | 'video' | 'document';
+  header_content?: string;
+  body_text: string;
+  footer_text?: string;
+  buttons?: TemplateButton[];
+  example_values?: string[];
+}
+
+export interface UpdateTemplateRequest {
+  name?: string;
+  status?: 'pending' | 'approved' | 'rejected';
+  rejection_reason?: string;
+  meta_template_id?: string;
+}
+
+export interface SendTemplateMessageRequest {
+  phone_number: string;
+  template_code: string;
+  language?: string;
+  parameters?: TemplateParameter[];
+}
+
+export interface TemplateParameter {
+  type: 'text' | 'currency' | 'date_time';
+  text?: string;
+}
+
