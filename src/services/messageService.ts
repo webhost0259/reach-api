@@ -15,36 +15,39 @@ export class MessageService {
     content: string,
     _templateId?: string
   ): Promise<{ messageId: string; status: string; queuePosition: number }> {
-    // Validate user and check limits
     await this.validateUserCanSend(userId);
-
-    // Validate phone number
     this.validatePhoneNumber(phoneNumber);
-
-    // Validate content length
     this.validateContent(content);
 
-    // Create message in database
+    // Get user's api_key_id
+    const apiKey = await queryOne<{ id: string }>(
+      'SELECT id FROM api_keys WHERE user_id = ? AND status = "active" LIMIT 1',
+      [userId]
+    );
+
+    if (!apiKey) {
+      throw new AppError('No active API key found', 404);
+    }
+
     const messageId = uuidv4();
     await query(
       `INSERT INTO messages (
         id, user_id, api_key_id, phone_number, content, 
         status, attempts, created_at, updated_at
-      ) VALUES (?, ?, NULL, ?, ?, 'queued', 0, NOW(), NOW())`,
-      [messageId, userId, phoneNumber, content]
+      ) VALUES (?, ?, ?, ?, ?, 'queued', 0, NOW(), NOW())`,
+      [messageId, userId, apiKey.id, phoneNumber, content]
     );
 
-    // Add to Redis queue
     const jobData: QueueJobData = {
       messageId,
       userId,
-      apiKeyId: '', // Will be populated from context
+      apiKeyId: apiKey.id,
       phoneNumber,
       content,
     };
 
     const job = await messageQueue.add(jobData, {
-      priority: 3, // Normal priority
+      priority: 3,
       attempts: 3,
       backoff: {
         type: 'exponential',
@@ -54,7 +57,6 @@ export class MessageService {
 
     logger.info('Message queued successfully', { messageId, jobId: job.id });
 
-    // Get queue position
     const queuePosition = await this.getQueuePosition();
 
     return {
@@ -64,9 +66,9 @@ export class MessageService {
     };
   }
 
-  /**
-   * Send bulk messages
-   */
+/**
+ * Send bulk messages
+ */
   async sendBulkMessages(
     userId: string,
     messages: SendMessageRequest[]
@@ -77,12 +79,20 @@ export class MessageService {
     messageIds: string[];
     failedMessages: Array<{ phone_number: string; error: string }>;
   }> {
-    // Validate user and check limits
     await this.validateUserCanSend(userId, messages.length);
 
-    // Validate bulk limit
     if (messages.length > 1000) {
       throw new AppError('Maximum 1000 messages per bulk request', 400);
+    }
+
+    // Get user's api_key_id once
+    const apiKey = await queryOne<{ id: string }>(
+      'SELECT id FROM api_keys WHERE user_id = ? AND status = "active" LIMIT 1',
+      [userId]
+    );
+
+    if (!apiKey) {
+      throw new AppError('No active API key found', 404);
     }
 
     const messageIds: string[] = [];
@@ -91,25 +101,22 @@ export class MessageService {
 
     for (const msg of messages) {
       try {
-        // Validate individual message
         this.validatePhoneNumber(msg.phone_number);
         this.validateContent(msg.content);
 
-        // Create message in database
         const messageId = uuidv4();
         await query(
           `INSERT INTO messages (
             id, user_id, api_key_id, phone_number, content, 
             status, attempts, created_at, updated_at
-          ) VALUES (?, ?, NULL, ?, ?, 'queued', 0, NOW(), NOW())`,
-          [messageId, userId, msg.phone_number, msg.content]
+          ) VALUES (?, ?, ?, ?, ?, 'queued', 0, NOW(), NOW())`,
+          [messageId, userId, apiKey.id, msg.phone_number, msg.content]
         );
 
-        // Add to queue
         const jobData: QueueJobData = {
           messageId,
           userId,
-          apiKeyId: '',
+          apiKeyId: apiKey.id,
           phoneNumber: msg.phone_number,
           content: msg.content,
         };

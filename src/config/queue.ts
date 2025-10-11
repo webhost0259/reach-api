@@ -2,30 +2,21 @@ import Queue, { Job, JobOptions } from 'bull';
 import logger from '../utils/logger';
 import { QueueJobData } from '../types';
 
-interface QueueConfig {
-  redis: {
-    host: string;
-    port: number;
-    password?: string;
-  };
-  defaultJobOptions: JobOptions;
-}
-
-const queueConfig: QueueConfig = {
+const queueConfig = {
   redis: {
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
-    password: process.env.REDIS_PASSWORD,
+    password: process.env.REDIS_PASSWORD || undefined,
   },
   defaultJobOptions: {
     attempts: parseInt(process.env.RETRY_ATTEMPTS || '3', 10),
     backoff: {
-      type: 'exponential',
+      type: 'exponential' as const,
       delay: parseInt(process.env.RETRY_DELAY || '5000', 10),
     },
     removeOnComplete: true,
     removeOnFail: false,
-  },
+  } as JobOptions,
 };
 
 // Create message queue with Redis connection
