@@ -6,13 +6,13 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install ALL dependencies (including devDependencies)
-RUN npm ci
+# Use npm install instead of npm ci
+RUN npm install
 
 # Copy all source code
 COPY . .
 
-# Build TypeScript to JavaScript
+# Build TypeScript
 RUN npm run build
 
 # Production stage
@@ -23,21 +23,21 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install ONLY production dependencies
-RUN npm ci --only=production
+# Use npm install for production
+RUN npm install --production
 
-# Copy built files from builder stage
+# Copy built files from builder
 COPY --from=builder /app/dist ./dist
 
 # Create logs directory
 RUN mkdir -p /app/logs
 
-# Expose port for health checks
+# Expose port
 EXPOSE 8081
 
-# Health check for container monitoring
+# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD node -e "require('http').get('http://localhost:8081/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})" || exit 1
 
-# Start the application
+# Start application
 CMD ["npm", "start"]
