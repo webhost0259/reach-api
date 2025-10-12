@@ -5,25 +5,48 @@ const router = Router();
 
 /**
  * @swagger
- * /webhooks/whatsapp:
+ * tags:
+ *   name: Webhooks
+ *   description: WhatsApp webhook endpoints
+ */
+
+/**
+ * @swagger
+ * /api/v1/webhooks/whatsapp:
  *   get:
- *     tags:
- *       - Webhooks
  *     summary: Verify WhatsApp webhook
+ *     tags: [Webhooks]
  *     security: []
+ *     parameters:
+ *       - in: query
+ *         name: hub.mode
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: hub.verify_token
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: hub.challenge
+ *         required: true
+ *         schema:
+ *           type: string
  *     responses:
  *       200:
- *         description: Webhook verified
+ *         description: Verification successful
+ *       403:
+ *         description: Verification failed
  */
 router.get('/whatsapp', verifyWhatsAppWebhook);
 
 /**
  * @swagger
- * /webhooks/whatsapp:
+ * /api/v1/webhooks/whatsapp:
  *   post:
- *     tags:
- *       - Webhooks
  *     summary: Receive WhatsApp webhook events
+ *     tags: [Webhooks]
  *     security: []
  *     responses:
  *       200:

@@ -1,4 +1,5 @@
 import axios, { AxiosError } from 'axios';
+import { pool } from '../config/database';
 import logger from '../utils/logger';
 
 interface WhatsAppMessagePayload {
@@ -32,7 +33,7 @@ interface WhatsAppResponse {
     wa_id: string;
   }>;
   messages: Array<{
-    id: string;
+    id: string; // This is the WAMID (WhatsApp Message ID)
   }>;
 }
 
@@ -54,15 +55,23 @@ export class WhatsAppService {
   /**
    * Send a template message via WhatsApp Business API
    * Templates are required for production - text messages not allowed
+   * 
+   * @param phoneNumber - Recipient phone number
+   * @param templateName - Template identifier (e.g., 'hello_world')
+   * @param languageCode - Template language code (e.g., 'en_US')
+   * @param parameters - Template parameters for placeholders
+   * @param messageId - Optional internal message ID to update in database
    */
   async sendTemplateMessage(
     phoneNumber: string,
     templateName: string = 'hello_world',
     languageCode: string = 'en_US',
-    parameters?: Array<{ type: string; text: string }>
+    parameters?: Array<{ type: string; text: string }>,
+    messageId?: string
   ): Promise<{
     success: boolean;
     messageId?: string;
+    externalMessageId?: string;
     error?: string;
   }> {
     try {
@@ -102,17 +111,35 @@ export class WhatsAppService {
         }
       );
 
-      const messageId = response.data.messages[0]?.id;
+      // Extract WhatsApp Message ID (WAMID) from response
+      const externalMessageId = response.data.messages[0]?.id;
+      const waId = response.data.contacts[0]?.wa_id;
+
+      if (!externalMessageId) {
+        logger.error('No message ID returned from WhatsApp API');
+        return {
+          success: false,
+          error: 'No message ID returned from WhatsApp',
+        };
+      }
 
       logger.info('WhatsApp template message sent successfully', {
         phoneNumber: cleanPhone,
-        messageId,
+        waId,
+        externalMessageId,
         templateName,
+        messageId,
       });
+
+      // Update database with external message ID if messageId is provided
+      if (messageId) {
+        await this.updateMessageWithExternalId(messageId, externalMessageId);
+      }
 
       return {
         success: true,
         messageId,
+        externalMessageId,
       };
     } catch (error) {
       return this.handleWhatsAppError(error, phoneNumber);
@@ -122,13 +149,19 @@ export class WhatsAppService {
   /**
    * Send a text message (ONLY works in test mode with approved recipients)
    * For production, use sendTemplateMessage instead
+   * 
+   * @param phoneNumber - Recipient phone number
+   * @param message - Text message content
+   * @param messageId - Optional internal message ID to update in database
    */
   async sendTextMessage(
     phoneNumber: string,
-    message: string
+    message: string,
+    messageId?: string
   ): Promise<{
     success: boolean;
     messageId?: string;
+    externalMessageId?: string;
     error?: string;
   }> {
     try {
@@ -157,22 +190,83 @@ export class WhatsAppService {
         }
       );
 
-      const messageId = response.data.messages[0]?.id;
+      // Extract WhatsApp Message ID (WAMID) from response
+      const externalMessageId = response.data.messages[0]?.id;
+      const waId = response.data.contacts[0]?.wa_id;
+
+      if (!externalMessageId) {
+        logger.error('No message ID returned from WhatsApp API');
+        return {
+          success: false,
+          error: 'No message ID returned from WhatsApp',
+        };
+      }
 
       logger.info('WhatsApp text message sent successfully', {
         phoneNumber: cleanPhone,
+        waId,
+        externalMessageId,
         messageId,
       });
+
+      // Update database with external message ID if messageId is provided
+      if (messageId) {
+        await this.updateMessageWithExternalId(messageId, externalMessageId);
+      }
 
       return {
         success: true,
         messageId,
+        externalMessageId,
       };
     } catch (error) {
       return this.handleWhatsAppError(error, phoneNumber);
     }
   }
 
+  /**
+   * Update message record with external WhatsApp message ID
+   * This allows webhook to match status updates to our internal messages
+   * 
+   * @param messageId - Internal message UUID
+   * @param externalMessageId - WhatsApp Message ID (WAMID)
+   */
+  private async updateMessageWithExternalId(
+    messageId: string,
+    externalMessageId: string
+  ): Promise<void> {
+    const connection = await pool.getConnection();
+
+    try {
+      await connection.execute(
+        `UPDATE messages 
+         SET external_message_id = ?, 
+             status = ?, 
+             sent_at = NOW(), 
+             updated_at = NOW() 
+         WHERE id = ?`,
+        [externalMessageId, 'sent', messageId]
+      );
+
+      logger.info('Message updated with external ID', {
+        messageId,
+        externalMessageId,
+      });
+    } catch (error) {
+      logger.error('Failed to update message with external ID', {
+        messageId,
+        externalMessageId,
+        error,
+      });
+      // Don't throw - message was sent successfully even if DB update fails
+    } finally {
+      connection.release();
+    }
+  }
+
+  /**
+   * Handle WhatsApp API errors with detailed logging
+   */
   private handleWhatsAppError(
     error: unknown,
     phoneNumber: string
@@ -210,6 +304,9 @@ export class WhatsAppService {
     };
   }
 
+  /**
+   * Verify WhatsApp API credentials
+   */
   async verifyCredentials(): Promise<boolean> {
     try {
       const response = await axios.get(`${this.apiUrl}/${this.phoneNumberId}`, {
@@ -217,7 +314,7 @@ export class WhatsAppService {
           Authorization: `Bearer ${this.accessToken}`,
         },
         params: {
-          fields: 'id,verified_name,display_phone_number',
+          fields: 'id,verified_name,display_phone_number,quality_rating',
         },
         timeout: 5000,
       });
@@ -225,6 +322,8 @@ export class WhatsAppService {
       logger.info('WhatsApp API credentials verified', {
         phoneNumberId: this.phoneNumberId,
         verifiedName: response.data.verified_name,
+        displayPhoneNumber: response.data.display_phone_number,
+        qualityRating: response.data.quality_rating,
       });
 
       return true;

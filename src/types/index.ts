@@ -27,10 +27,18 @@ export interface IMessage {
   api_key_id: string;
   phone_number: string;
   content: string;
-  status: 'queued' | 'processing' | 'sent' | 'delivered' | 'failed';
-  error_message?: string;
+  template_code?: string;
+  external_message_id?: string;
+  status: 'queued' | 'processing' | 'sent' | 'delivered' | 'read' | 'failed' | 'scheduled';
   attempts: number;
+  scheduled_at?: Date;
   created_at: Date;
+  sent_at?: Date;
+  delivered_at?: Date;
+  read_at?: Date;
+  failed_at?: Date;
+  error_code?: string;
+  error_message?: string;
   updated_at: Date;
 }
 
@@ -63,7 +71,7 @@ export interface JwtPayload {
 export interface SendMessageRequest {
   phone_number: string;
   content: string;
-  template_id?: string;
+  template_code?: string;
 }
 
 export interface BulkMessageRequest {
@@ -83,9 +91,8 @@ export interface QueueJobData {
   apiKeyId: string;
   phoneNumber: string;
   content: string;
+  templateCode?: string;
 }
-
-// Add these to existing types file
 
 export interface MessageTemplate {
   id: string;
@@ -145,4 +152,3 @@ export interface TemplateParameter {
   type: 'text' | 'currency' | 'date_time';
   text?: string;
 }
-

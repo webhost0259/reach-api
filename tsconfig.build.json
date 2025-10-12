@@ -3,7 +3,8 @@
   "compilerOptions": {
     "sourceMap": false,
     "declaration": false,
-    "declarationMap": false
+    "declarationMap": false,
+    "types": ["node", "express"]
   },
-  "exclude": ["node_modules", "dist", "tests", "**/*.test.ts", "**/*.spec.ts"]
+  "exclude": ["node_modules", "dist", "test", "tests", "**/*.test.ts", "**/*.spec.ts"]
 }

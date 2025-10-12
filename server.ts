@@ -6,7 +6,7 @@ import logger from './src/utils/logger';
 import { testDatabaseConnection } from './src/config/database';
 import { testRedisConnection } from './src/config/redis';
 
-const PORT = parseInt(process.env.PORT || '3000', 10);
+const PORT = parseInt(process.env.PORT || '8081', 10);
 
 async function startServer(): Promise<void> {
   try {
