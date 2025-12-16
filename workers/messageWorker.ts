@@ -4,9 +4,10 @@ dotenv.config();
 import { Job } from 'bull';
 import messageQueue from '../src/config/queue';
 import logger from '../src/utils/logger';
-import whatsappService from '../src/services/whatsappService';
+import whatsappConfigService from '../src/services/whatsAppConfigService'; // ✅ Import
 import messageService from '../src/services/messageService';
-import { QueueJobData } from '../src/types';
+import { QueueJobData } from '../src/types/message.types';
+import axios from 'axios';
 
 class MessageWorker {
   private concurrency: number;
@@ -25,31 +26,35 @@ class MessageWorker {
       nodeEnv: process.env.NODE_ENV,
     });
 
-    // Process jobs with configured concurrency
-    messageQueue.process(this.concurrency, async (job: Job<QueueJobData>) => {
+    messageQueue.process('send-message', this.concurrency, async (job: Job<QueueJobData>) => {
       return await this.processMessage(job);
     });
 
-    // Event listeners for monitoring
     messageQueue.on('completed', (job: Job, result: any) => {
-      logger.info(`✅ Job ${job.id} completed`, {
-        messageId: result.messageId,
-        externalMessageId: result.externalMessageId,
-      });
+      if (job.name === 'send-message') {
+        logger.info(`✅ Job ${job.id} completed`, {
+          messageId: result?.messageId,
+          externalMessageId: result?.externalMessageId,
+        });
+      }
     });
 
     messageQueue.on('failed', (job: Job, err: Error) => {
-      logger.error(`❌ Job ${job.id} failed`, {
-        messageId: job.data.messageId,
-        error: err.message,
-        attempts: job.attemptsMade,
-      });
+      if (job.name === 'send-message') {
+        logger.error(`❌ Job ${job.id} failed`, {
+          messageId: job.data?.messageId,
+          error: err.message,
+          attempts: job.attemptsMade,
+        });
+      }
     });
 
     messageQueue.on('stalled', (job: Job) => {
-      logger.warn(`⚠️ Job ${job.id} stalled`, {
-        messageId: job.data.messageId,
-      });
+      if (job.name === 'send-message') {
+        logger.warn(`⚠️ Job ${job.id} stalled`, {
+          messageId: job.data?.messageId,
+        });
+      }
     });
 
     logger.info('✅ Message worker is now processing jobs');
@@ -61,18 +66,14 @@ class MessageWorker {
     logger.info('Message worker stopped');
   }
 
-  /**
-   * Process individual message job
-   * 
-   * Flow:
-   * 1. Rate limit enforcement
-   * 2. Update status to 'processing'
-   * 3. Call WhatsApp API with messageId
-   * 4. WhatsApp service updates DB with external_message_id
-   * 5. Return success or throw error for retry
-   */
   private async processMessage(job: Job<QueueJobData>): Promise<any> {
-    const { messageId, phoneNumber, templateCode } = job.data;
+    const { messageId, phoneNumber, templateCode, userId } = job.data;
+
+    if (!messageId || !phoneNumber) {
+      const error = 'Missing required job data: messageId or phoneNumber';
+      logger.error(error, { jobData: job.data });
+      throw new Error(error);
+    }
 
     logger.info(`📤 Processing message ${messageId}`, {
       phoneNumber,
@@ -86,35 +87,64 @@ class MessageWorker {
       await messageService.updateMessageStatus(messageId, 'processing');
       await messageService.incrementAttempts(messageId);
 
+      // ✅ Get tenant_id from userId
+      const userResult = await messageService.getUserTenantId(userId!);
+      
+      if (!userResult?.tenant_id) {
+        throw new Error('Tenant ID not found for user');
+      }
+
+      // ✅ Get WhatsApp config (with automatic decryption)
+      const whatsappConfig = await whatsappConfigService.getActiveConfig(userResult.tenant_id);
+
       const templateToUse = templateCode || 'hello_world';
-      const languageCode = 'en_US';
 
-      // CRITICAL FIX: Don't pass any parameters for hello_world template
-      const parameters = undefined;  // Always undefined for now
+      // Build message payload
+      const messagePayload = {
+        messaging_product: 'whatsapp',
+        to: phoneNumber,
+        type: 'template',
+        template: {
+          name: templateToUse,
+          language: {
+            code: 'en_US',
+          },
+        },
+      };
 
-      const result = await whatsappService.sendTemplateMessage(
-        phoneNumber,
-        templateToUse,
-        languageCode,
-        parameters,  // Always undefined
-        messageId
+      // ✅ Send via WhatsApp API (token already decrypted)
+      const response = await axios.post(
+        `https://graph.facebook.com/v21.0/${whatsappConfig.phoneNumberId}/messages`,
+        messagePayload,
+        {
+          headers: {
+            'Authorization': `Bearer ${whatsappConfig.accessToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
       );
 
-      if (result.success) {
-        logger.info(`✅ Message ${messageId} sent successfully`, {
-          externalMessageId: result.externalMessageId,
-          phoneNumber,
-        });
+      const externalMessageId = response.data.messages[0].id;
 
-        return {
-          success: true,
-          messageId,
-          externalMessageId: result.externalMessageId,
-          phoneNumber,
-        };
-      } else {
-        throw new Error(result.error || 'Failed to send message via WhatsApp API');
-      }
+      // Update message with WhatsApp message ID
+      await messageService.updateMessageWithExternalId(
+        messageId,
+        externalMessageId,
+        'sent'
+      );
+
+      logger.info(`✅ Message ${messageId} sent successfully`, {
+        externalMessageId,
+        phoneNumber,
+      });
+
+      return {
+        success: true,
+        messageId,
+        externalMessageId,
+        phoneNumber,
+      };
+
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       
@@ -144,62 +174,20 @@ class MessageWorker {
     }
   }
 
-
-  /**
-   * Enforce rate limiting to comply with WhatsApp API limits
-   * WhatsApp Cloud API: 80 messages/second (Business), 1000/day (Developer)
-   */
   private async enforceRateLimit(): Promise<void> {
     const now = Date.now();
-    const minInterval = 1000 / this.messagesPerSecond; // milliseconds between messages
+    const minInterval = 1000 / this.messagesPerSecond;
     const timeSinceLastProcess = now - this.lastProcessTime;
 
     if (timeSinceLastProcess < minInterval) {
       const waitTime = Math.ceil(minInterval - timeSinceLastProcess);
-      logger.debug(`⏱️ Rate limiting: waiting ${waitTime}ms`, {
-        lastProcess: this.lastProcessTime,
-        now,
-        minInterval,
-      });
+      logger.debug(`⏱️ Rate limiting: waiting ${waitTime}ms`);
       await new Promise((resolve) => setTimeout(resolve, waitTime));
     }
 
     this.lastProcessTime = Date.now();
   }
 
-  /**
-   * Parse template parameters from content string
-   * 
-   * Examples:
-   * - "John" → [{ type: 'text', text: 'John' }]
-   * - "John,Doe,123" → [{ type: 'text', text: 'John' }, { type: 'text', text: 'Doe' }, { type: 'text', text: '123' }]
-   * 
-   * @param content - Comma-separated parameter values
-   * @returns Array of parameter objects for WhatsApp API
-   */
-  // private parseTemplateParameters(content: string): Array<{ type: string; text: string }> | undefined {
-  //   // Return undefined if content is empty/whitespace
-  //   if (!content || content.trim().length === 0) {
-  //     return undefined;
-  //   }
-
-  //   // Split by comma and filter empty values
-  //   const values = content.split(',').map(v => v.trim()).filter(v => v.length > 0);
-    
-  //   // Return undefined if no values after filtering
-  //   if (values.length === 0) {
-  //     return undefined;
-  //   }
-
-  //   // Return array of parameters
-  //   return values.map(value => ({
-  //     type: 'text',
-  //     text: value,
-  //   }));
-  // }
-  /**
-   * Get worker health status
-   */
   async getStatus(): Promise<{
     isRunning: boolean;
     waiting: number;

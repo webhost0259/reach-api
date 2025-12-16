@@ -20,70 +20,71 @@ export class MessageService {
     userId: string,
     phoneNumber: string,
     content: string,
-    templateCode?: string  // Changed from _templateId to templateCode
+    templateCode?: string
   ): Promise<{ messageId: string; status: string; queuePosition: number }> {
-    await this.validateUserCanSend(userId);
-    this.validatePhoneNumber(phoneNumber);
+      await this.validateUserCanSend(userId);
+      this.validatePhoneNumber(phoneNumber);
 
-    // For template messages, content is optional
-    if (!templateCode) {
-      this.validateContent(content);
+      if (!templateCode) {
+        this.validateContent(content);
+      }
+
+      const apiKey = await queryOne<{ id: string }>(
+        'SELECT id FROM api_keys WHERE user_id = ? AND status = "active" LIMIT 1',
+        [userId]
+      );
+
+      if (!apiKey) {
+        throw new AppError('No active API key found', 404);
+      }
+
+      const messageId = uuidv4();
+      
+      await query(
+        `INSERT INTO messages (
+          id, user_id, api_key_id, phone_number, content, template_code,
+          status, attempts, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, NOW(), NOW())`,
+        [messageId, userId, apiKey.id, phoneNumber, content || '', templateCode || null]
+      );
+
+      const jobData: QueueJobData = {
+        messageId,
+        userId,
+        apiKeyId: apiKey.id,
+        phoneNumber,
+        content,
+        templateCode,
+      };
+
+      // ✅ FIX: Add job name 'send-message'
+      const job = await messageQueue.add(
+        'send-message', // ← ADD THIS
+        jobData,
+        {
+          priority: 3,
+          attempts: 3,
+          backoff: {
+            type: 'exponential',
+            delay: 5000,
+          },
+        }
+      );
+
+      logger.info('Message queued successfully', { 
+        messageId, 
+        jobId: job.id,
+        templateCode 
+      });
+
+      const queuePosition = await this.getQueuePosition();
+
+      return {
+        messageId,
+        status: 'queued',
+        queuePosition,
+      };
     }
-
-    // Get user's api_key_id
-    const apiKey = await queryOne<{ id: string }>(
-      'SELECT id FROM api_keys WHERE user_id = ? AND status = "active" LIMIT 1',
-      [userId]
-    );
-
-    if (!apiKey) {
-      throw new AppError('No active API key found', 404);
-    }
-
-    const messageId = uuidv4();
-    
-    // CRITICAL: Store template_code in database
-    await query(
-      `INSERT INTO messages (
-        id, user_id, api_key_id, phone_number, content, template_code,
-        status, attempts, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, NOW(), NOW())`,
-      [messageId, userId, apiKey.id, phoneNumber, content || '', templateCode || null]
-    );
-
-    // CRITICAL: Pass messageId and templateCode to worker
-    const jobData: QueueJobData = {
-      messageId,           // Internal UUID - used to update DB with WAMID
-      userId,
-      apiKeyId: apiKey.id,
-      phoneNumber,
-      content,
-      templateCode,        // Add this field
-    };
-
-    const job = await messageQueue.add(jobData, {
-      priority: 3,
-      attempts: 3,
-      backoff: {
-        type: 'exponential',
-        delay: 5000,
-      },
-    });
-
-    logger.info('Message queued successfully', { 
-      messageId, 
-      jobId: job.id,
-      templateCode 
-    });
-
-    const queuePosition = await this.getQueuePosition();
-
-    return {
-      messageId,
-      status: 'queued',
-      queuePosition,
-    };
-  }
 
   /**
    * Send bulk messages
@@ -102,86 +103,87 @@ export class MessageService {
     messageIds: string[];
     failedMessages: Array<{ phone_number: string; error: string }>;
   }> {
-    await this.validateUserCanSend(userId, messages.length);
+      await this.validateUserCanSend(userId, messages.length);
 
-    if (messages.length > 1000) {
-      throw new AppError('Maximum 1000 messages per bulk request', 400);
-    }
-
-    // Get user's api_key_id once
-    const apiKey = await queryOne<{ id: string }>(
-      'SELECT id FROM api_keys WHERE user_id = ? AND status = "active" LIMIT 1',
-      [userId]
-    );
-
-    if (!apiKey) {
-      throw new AppError('No active API key found', 404);
-    }
-
-    const messageIds: string[] = [];
-    const failedMessages: Array<{ phone_number: string; error: string }> = [];
-    let queued = 0;
-
-    for (const msg of messages) {
-      try {
-        this.validatePhoneNumber(msg.phone_number);
-
-        // Validate content only if no template_code provided
-        if (!msg.template_code) {
-          this.validateContent(msg.content);
-        }
-
-        const messageId = uuidv4();
-        
-        // CRITICAL: Store template_code
-        await query(
-          `INSERT INTO messages (
-            id, user_id, api_key_id, phone_number, content, template_code,
-            status, attempts, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, NOW(), NOW())`,
-          [messageId, userId, apiKey.id, msg.phone_number, msg.content || '', msg.template_code || null]
-        );
-
-        // CRITICAL: Pass messageId and templateCode to worker
-        const jobData: QueueJobData = {
-          messageId,           // Internal UUID
-          userId,
-          apiKeyId: apiKey.id,
-          phoneNumber: msg.phone_number,
-          content: msg.content,
-          templateCode: msg.template_code,  // Add this field
-        };
-
-        await messageQueue.add(jobData, {
-          priority: 3,
-          attempts: 3,
-        });
-
-        messageIds.push(messageId);
-        queued++;
-      } catch (error) {
-        logger.error('Failed to queue message', { phone: msg.phone_number, error });
-        failedMessages.push({
-          phone_number: msg.phone_number,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        });
+      if (messages.length > 1000) {
+        throw new AppError('Maximum 1000 messages per bulk request', 400);
       }
+
+      const apiKey = await queryOne<{ id: string }>(
+        'SELECT id FROM api_keys WHERE user_id = ? AND status = "active" LIMIT 1',
+        [userId]
+      );
+
+      if (!apiKey) {
+        throw new AppError('No active API key found', 404);
+      }
+
+      const messageIds: string[] = [];
+      const failedMessages: Array<{ phone_number: string; error: string }> = [];
+      let queued = 0;
+
+      for (const msg of messages) {
+        try {
+          this.validatePhoneNumber(msg.phone_number);
+
+          if (!msg.template_code) {
+            this.validateContent(msg.content);
+          }
+
+          const messageId = uuidv4();
+          
+          await query(
+            `INSERT INTO messages (
+              id, user_id, api_key_id, phone_number, content, template_code,
+              status, attempts, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, NOW(), NOW())`,
+            [messageId, userId, apiKey.id, msg.phone_number, msg.content || '', msg.template_code || null]
+          );
+
+          const jobData: QueueJobData = {
+            messageId,
+            userId,
+            apiKeyId: apiKey.id,
+            phoneNumber: msg.phone_number,
+            content: msg.content,
+            templateCode: msg.template_code,
+          };
+
+          // ✅ FIX: Add job name 'send-message'
+          await messageQueue.add(
+            'send-message', // ← ADD THIS
+            jobData,
+            {
+              priority: 3,
+              attempts: 3,
+            }
+          );
+
+          messageIds.push(messageId);
+          queued++;
+        } catch (error) {
+          logger.error('Failed to queue message', { phone: msg.phone_number, error });
+          failedMessages.push({
+            phone_number: msg.phone_number,
+            error: error instanceof Error ? error.message : 'Unknown error',
+          });
+        }
+      }
+
+      logger.info('Bulk messages processed', {
+        total: messages.length,
+        queued,
+        failed: failedMessages.length,
+      });
+
+      return {
+        total: messages.length,
+        queued,
+        failed: failedMessages.length,
+        messageIds,
+        failedMessages,
+      };
     }
-
-    logger.info('Bulk messages processed', {
-      total: messages.length,
-      queued,
-      failed: failedMessages.length,
-    });
-
-    return {
-      total: messages.length,
-      queued,
-      failed: failedMessages.length,
-      messageIds,
-      failedMessages,
-    };
-  }
 
   /**
    * Get message by ID with authorization check
@@ -303,79 +305,78 @@ export class MessageService {
     phoneNumber: string,
     content: string,
     scheduledAt: Date,
-    templateCode?: string  // Changed from _templateId
+    templateCode?: string
   ): Promise<{ messageId: string; status: string; scheduledAt: Date }> {
-    // Validate scheduled time
-    const now = new Date();
-    if (scheduledAt <= now) {
-      throw new AppError('Scheduled time must be in the future', 400);
+      const now = new Date();
+      if (scheduledAt <= now) {
+        throw new AppError('Scheduled time must be in the future', 400);
+      }
+
+      const maxDate = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+      if (scheduledAt > maxDate) {
+        throw new AppError('Cannot schedule more than 30 days in advance', 400);
+      }
+
+      await this.validateUserCanSend(userId);
+      this.validatePhoneNumber(phoneNumber);
+
+      if (!templateCode) {
+        this.validateContent(content);
+      }
+
+      const apiKey = await queryOne<{ id: string }>(
+        'SELECT id FROM api_keys WHERE user_id = ? AND status = "active" LIMIT 1',
+        [userId]
+      );
+
+      if (!apiKey) {
+        throw new AppError('No active API key found', 404);
+      }
+
+      const messageId = uuidv4();
+      
+      await query(
+        `INSERT INTO messages (
+          id, user_id, api_key_id, phone_number, content, template_code,
+          status, attempts, scheduled_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'scheduled', 0, ?, NOW(), NOW())`,
+        [messageId, userId, apiKey.id, phoneNumber, content || '', templateCode || null, scheduledAt]
+      );
+
+      const delay = scheduledAt.getTime() - now.getTime();
+      
+      const jobData: QueueJobData = {
+        messageId,
+        userId,
+        apiKeyId: apiKey.id,
+        phoneNumber,
+        content,
+        templateCode,
+      };
+
+      // ✅ FIX: Add job name 'send-message'
+      await messageQueue.add(
+        'send-message', // ← ADD THIS
+        jobData,
+        {
+          delay,
+          priority: 3,
+          attempts: 3,
+        }
+      );
+
+      logger.info('Message scheduled successfully', { 
+        messageId, 
+        scheduledAt,
+        templateCode 
+      });
+
+      return {
+        messageId,
+        status: 'scheduled',
+        scheduledAt,
+      };
     }
-
-    // Max 30 days in advance
-    const maxDate = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-    if (scheduledAt > maxDate) {
-      throw new AppError('Cannot schedule more than 30 days in advance', 400);
-    }
-
-    await this.validateUserCanSend(userId);
-    this.validatePhoneNumber(phoneNumber);
-
-    if (!templateCode) {
-      this.validateContent(content);
-    }
-
-    // Get user's api_key_id
-    const apiKey = await queryOne<{ id: string }>(
-      'SELECT id FROM api_keys WHERE user_id = ? AND status = "active" LIMIT 1',
-      [userId]
-    );
-
-    if (!apiKey) {
-      throw new AppError('No active API key found', 404);
-    }
-
-    const messageId = uuidv4();
-    
-    // CRITICAL: Store template_code
-    await query(
-      `INSERT INTO messages (
-        id, user_id, api_key_id, phone_number, content, template_code,
-        status, attempts, scheduled_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'scheduled', 0, ?, NOW(), NOW())`,
-      [messageId, userId, apiKey.id, phoneNumber, content || '', templateCode || null, scheduledAt]
-    );
-
-    // Add to queue with delay
-    const delay = scheduledAt.getTime() - now.getTime();
-    
-    // CRITICAL: Pass messageId and templateCode
-    const jobData: QueueJobData = {
-      messageId,
-      userId,
-      apiKeyId: apiKey.id,
-      phoneNumber,
-      content,
-      templateCode,
-    };
-
-    await messageQueue.add(jobData, {
-      delay,
-      priority: 3,
-      attempts: 3,
-    });
-
-    logger.info('Message scheduled successfully', { 
-      messageId, 
-      scheduledAt,
-      templateCode 
-    });
-
-    return {
-      messageId,
-      status: 'scheduled',
-      scheduledAt,
-    };
-  }
 
   /**
    * Validate user can send messages
@@ -482,6 +483,36 @@ export class MessageService {
       [messageId]
     );
   }
+
+  /**
+   * Get tenant_id from user_id
+   */
+  async getUserTenantId(userId: string): Promise<{ tenant_id: string } | null> {
+    return await queryOne<{ tenant_id: string }>(
+      'SELECT tenant_id FROM users WHERE id = ?',
+      [userId]
+    );
+  }
+
+  /**
+   * Update message with external WhatsApp message ID
+   */
+  async updateMessageWithExternalId(
+    messageId: string,
+    externalMessageId: string,
+    status: string
+  ): Promise<void> {
+    await query(
+      `UPDATE messages 
+      SET external_message_id = ?,
+          status = ?,
+          sent_at = NOW(),
+          updated_at = NOW()
+      WHERE id = ?`,
+      [externalMessageId, status, messageId]
+    );
+  }
+
 }
 
 export default new MessageService();

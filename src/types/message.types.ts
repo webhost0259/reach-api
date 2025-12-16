@@ -33,14 +33,32 @@ export interface BulkMessageRequest {
   messages: SendMessageRequest[];
 }
 
-// Queue job data (for Bull queue)
 export interface QueueJobData {
-  messageId: string;
-  userId: string;
-  apiKeyId: string;
-  phoneNumber: string;
-  content: string;
+  // Regular message fields
+  messageId?: string;
+  userId?: string;
+  apiKeyId?: string;
+  phoneNumber?: string;
+  content?: string;
   templateCode?: string;
+  
+  // Campaign fields
+  type?: 'message' | 'campaign' | 'campaign-recipient';
+  campaign_id?: string;
+  tenant_id?: string;
+  recipient_id?: string;
+  customer_id?: string;
+  variables?: Record<string, any>;
+  body_text?: string;
+  phone_number_id?: string;
+  access_token?: string;
+  max_retries?: number;
+}
+
+export interface CampaignJobData {
+  campaign_id: string;
+  tenant_id: string;
+  type: 'campaign';
 }
 
 // Message response
@@ -76,3 +94,5 @@ export interface ScheduleMessageResponse {
   status: string;
   scheduledAt: Date;
 }
+
+

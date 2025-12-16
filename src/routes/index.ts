@@ -6,7 +6,7 @@ import webhookRoutes from './webhookRoutes';
 import templateRoutes from './templateRoutes';
 import settingsRoutes from './settingsRoutes';
 import whatsappConfigRoutes from './whatsappConfigRoutes';
-
+import campaignRoutes from './campaignRoutes';
 
 const router = Router();
 
@@ -18,5 +18,6 @@ router.use('/webhooks', webhookRoutes);
 router.use('/templates', templateRoutes);
 router.use('/settings', settingsRoutes);
 router.use('/whatsapp-config', whatsappConfigRoutes);
+router.use('/campaigns', campaignRoutes);
 
 export default router;
