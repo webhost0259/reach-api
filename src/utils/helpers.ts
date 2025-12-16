@@ -1,6 +1,6 @@
 import { randomBytes } from 'crypto';
 import { Request } from 'express';
-import { JwtPayload } from '../types';
+import { JwtPayload } from 'jsonwebtoken';
 import { AppError } from '../middleware/errorMiddleware';
 
 /**

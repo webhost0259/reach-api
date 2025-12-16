@@ -4,7 +4,7 @@ dotenv.config();
 import axios from 'axios';
 import { query } from '../src/config/database';
 
-const API_BASE = 'http://localhost:3000/api/v1';
+const API_BASE = 'http://localhost:8081/api/v1'; // ✅ Changed from 3000 to 8000
 const colors = {
   reset: '\x1b[0m',
   green: '\x1b[32m',
@@ -44,39 +44,54 @@ async function runTests() {
       email: testEmail,
       password: 'SecurePass123!',
       phone: testNumbers.indian,
+      first_name: 'Test',
+      last_name: 'User',
     });
 
     if (registerResponse.data.success) {
       log('✅ User registered successfully', colors.green);
       log(`   📧 Email: ${testEmail}`, colors.cyan);
-      log(`   🔑 Client ID: ${registerResponse.data.data.api_credentials.client_id}`, colors.cyan);
+      log(`   🆔 Tenant ID: ${registerResponse.data.data.user.tenant_id}`, colors.cyan);
+      log(`   🔑 Test Client ID: ${registerResponse.data.data.api_credentials.test.client_id}`, colors.cyan);
+      log(`   🔑 Prod Client ID: ${registerResponse.data.data.api_credentials.production.client_id}`, colors.cyan);
       log(`   📊 Status: ${registerResponse.data.data.user.signup_status}`, colors.cyan);
       log(`   🎯 Tier: ${registerResponse.data.data.user.tier}`, colors.cyan);
 
-      const clientId = registerResponse.data.data.api_credentials.client_id;
-      const clientSecret = registerResponse.data.data.api_credentials.client_secret;
+      // ✅ NEW: Get token directly from registration response
+      token = registerResponse.data.data.token;
+      log(`   🎫 Token: ${token.substring(0, 50)}...`, colors.cyan);
 
-      // TEST 2: Approve User
-      log('\n⚙️  Test 2: User Approval (Database)', colors.yellow);
-      await query('UPDATE users SET signup_status = ? WHERE email = ?', ['approved', testEmail]);
-      log('✅ User approved successfully', colors.green);
-      log('   Status changed: pending → approved', colors.cyan);
+      const clientId = registerResponse.data.data.api_credentials.test.client_id;
+      const clientSecret = registerResponse.data.data.api_credentials.test.client_secret;
 
       await sleep(1000);
 
-      // TEST 3: JWT Authentication
-      log('\n🔐 Test 3: JWT Token Generation', colors.yellow);
+      // TEST 2: Verify token works
+      log('\n🔐 Test 2: Verify JWT Token', colors.yellow);
+      const meResponse = await axios.get(`${API_BASE}/auth/me`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (meResponse.data.success) {
+        log('✅ Token verified successfully', colors.green);
+        log(`   👤 User: ${meResponse.data.data.email}`, colors.cyan);
+        log(`   🆔 Tenant: ${meResponse.data.data.tenant_id}`, colors.cyan);
+        log(`   📊 Account Type: ${meResponse.data.data.account_type}`, colors.cyan);
+      }
+
+      await sleep(1000);
+
+      // TEST 3: Test API Key Authentication
+      log('\n🔑 Test 3: API Key Authentication', colors.yellow);
       const tokenResponse = await axios.post(`${API_BASE}/auth/token`, {
         client_id: clientId,
         client_secret: clientSecret,
       });
 
       if (tokenResponse.data.success) {
-        token = tokenResponse.data.data.token;
-        log('✅ JWT token generated', colors.green);
-        log(`   🎫 Token: ${token.substring(0, 50)}...`, colors.cyan);
+        log('✅ API key authentication successful', colors.green);
+        log(`   🎫 New Token: ${tokenResponse.data.data.token.substring(0, 50)}...`, colors.cyan);
         log(`   ⏱️  Expires: ${tokenResponse.data.data.expires_in}`, colors.cyan);
-        log(`   👤 User: ${tokenResponse.data.data.user.email}`, colors.cyan);
       }
 
       await sleep(1000);
@@ -188,7 +203,7 @@ async function runTests() {
 
       // TEST 8: Health Check
       log('\n🏥 Test 8: API Health Check', colors.yellow);
-      const healthResponse = await axios.get('http://localhost:3000/health');
+      const healthResponse = await axios.get('http://localhost:8081/health');
       if (healthResponse.data.success) {
         log('✅ API is healthy', colors.green);
         log(`   🌍 Environment: ${healthResponse.data.environment}`, colors.cyan);
@@ -202,6 +217,7 @@ async function runTests() {
       log('📊 Test Results Summary:', colors.cyan);
       log('  ✅ User Registration & Authentication', colors.green);
       log('  ✅ JWT Token Generation & Validation', colors.green);
+      log('  ✅ API Key Authentication', colors.green);
       log('  ✅ Single Message Sending', colors.green);
       log('  ✅ Message Status Tracking', colors.green);
       log('  ✅ Message Pagination & Listing', colors.green);
@@ -214,8 +230,8 @@ async function runTests() {
       
       log('\n🔧 API Configuration:', colors.cyan);
       log(`  • WhatsApp API: v22.0`, colors.magenta);
-      log(`  • Phone Number ID: 736749919529860`, colors.magenta);
-      log(`  • Business Account: 1124466539618920`, colors.magenta);
+      log(`  • Multi-tenant: Enabled`, colors.magenta);
+      log(`  • Auto-approval: Enabled`, colors.magenta);
       
       log('\n' + '='.repeat(70), colors.blue);
 
@@ -229,7 +245,6 @@ async function runTests() {
       ]);
       await query('DELETE FROM users WHERE email = ?', [testEmail]);
       log('✅ Test data cleaned up successfully\n', colors.green);
-      
     }
   } catch (error: any) {
     log('\n' + '='.repeat(70), colors.red);
@@ -242,7 +257,7 @@ async function runTests() {
       console.log(JSON.stringify(error.response.data, null, 2));
     } else if (error.request) {
       log('\n❌ No response from server', colors.red);
-      log('⚠️  Make sure API server is running on http://localhost:3000', colors.yellow);
+      log('⚠️  Make sure API server is running on http://localhost:8081', colors.yellow);
       log('   Terminal 1: npm run dev', colors.cyan);
       log('   Terminal 2: npm run worker:dev', colors.cyan);
     } else {
@@ -262,8 +277,8 @@ log('='.repeat(70), colors.blue);
 log('\n⚠️  Prerequisites:', colors.yellow);
 log('   ✓ API server running (Terminal 1: npm run dev)', colors.cyan);
 log('   ✓ Worker running (Terminal 2: npm run worker:dev)', colors.cyan);
-log('   ✓ Database connected (MariaDB on 82.112.236.69)', colors.cyan);
-log('   ✓ Redis connected (82.112.236.69:6379)', colors.cyan);
+log('   ✓ Database connected', colors.cyan);
+log('   ✓ Redis connected', colors.cyan);
 log('   ✓ WhatsApp API configured (v22.0)', colors.cyan);
 log('\n⏳ Starting tests in 3 seconds...\n', colors.magenta);
 

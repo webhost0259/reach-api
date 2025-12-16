@@ -1,13 +1,14 @@
 import 'express';
 
-declare module 'express-serve-static-core' {
+declare namespace Express {
   interface Request {
     user?: {
       userId: string;
+      tenant_id: string;
       email: string;
       tier: string;
-      iat?: number;
-      exp?: number;
     };
   }
 }
+
+export {}; // Make this a module

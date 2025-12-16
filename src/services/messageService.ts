@@ -1,7 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
 import { query, queryOne } from '../config/database';
 import { messageQueue } from '../config/queue';
-import { IMessage, IUser, SendMessageRequest, QueueJobData } from '../types';
+import { IUser } from '../types';
+import { SendMessageRequest, QueueJobData, IMessage } from '../types/message.types'; 
 import { AppError } from '../middleware/errorMiddleware';
 import logger from '../utils/logger';
 

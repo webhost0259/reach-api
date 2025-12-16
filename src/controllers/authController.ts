@@ -1,30 +1,44 @@
 import { Request, Response } from 'express';
 import { asyncHandler } from '../middleware/errorMiddleware';
 import authService from '../services/authService';
+import { RegisterRequest, JWTPayload } from '../types';
+
+interface AuthenticatedRequest extends Request {
+  user?: JWTPayload;
+}
 
 /**
  * Register new user
  */
 export const register = asyncHandler(async (req: Request, res: Response) => {
-  const { email, password, phone } = req.body;
+  const data: RegisterRequest = req.body;
 
-  const result = await authService.register(email, password, phone);
+  const result = await authService.register(data);
 
   res.status(201).json({
     success: true,
-    message: 'User registered successfully. Awaiting approval.',
+    message: 'User registered successfully. Account is now active.',
     data: {
       user: {
         id: result.user.id,
+        tenant_id: result.user.tenant_id,
         email: result.user.email,
+        account_type: result.user.account_type,
+        organization_name: result.user.organization_name,
         tier: result.user.tier,
         signup_status: result.user.signup_status,
       },
       api_credentials: {
-        client_id: result.apiKey.client_id,
-        client_secret: result.apiKey.client_secret_plain, // Plain secret shown only once
-        environment: result.apiKey.environment,
+        test: {
+          client_id: result.apiKeys.test.client_id,
+          client_secret: result.apiKeys.test.client_secret_plain!,
+        },
+        production: {
+          client_id: result.apiKeys.production.client_id,
+          client_secret: result.apiKeys.production.client_secret_plain!,
+        },
       },
+      token: result.token,
     },
   });
 });
@@ -44,7 +58,10 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
       expires_in: '24h',
       user: {
         id: user.id,
+        tenant_id: user.tenant_id,
         email: user.email,
+        account_type: user.account_type,
+        organization_name: user.organization_name,
         tier: user.tier,
         daily_sms_limit: user.daily_sms_limit,
       },
@@ -67,6 +84,7 @@ export const getToken = asyncHandler(async (req: Request, res: Response) => {
       expires_in: '24h',
       user: {
         id: user.id,
+        tenant_id: user.tenant_id,
         email: user.email,
         tier: user.tier,
       },
@@ -78,25 +96,54 @@ export const getToken = asyncHandler(async (req: Request, res: Response) => {
  * Refresh token
  */
 export const refreshToken = asyncHandler(async (req: Request, res: Response) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.replace('Bearer ', '');
+  // Middleware already verified token and set req.user
+  const userId = (req as AuthenticatedRequest).user?.id;
 
-  if (!token) {
-    res.status(401).json({ success: false, error: 'No token provided' });
+  if (!userId) {
+    res.status(401).json({ success: false, error: 'Invalid token' });
     return;
   }
 
-  // Verify current token
-  const payload = authService.verifyToken(token);
-
   // Generate new token for the same user
-  const newToken = await authService.refreshTokenFromUser(payload.userId);
+  const newToken = await authService.refreshTokenFromUser(userId);
 
   res.status(200).json({
     success: true,
     data: {
       token: newToken,
       expires_in: '24h',
+    },
+  });
+});
+
+/**
+ * Get current user (NEW - for dashboard)
+ */
+export const getCurrentUser = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as AuthenticatedRequest).user?.id;
+
+  if (!userId) {
+    res.status(401).json({ success: false, error: 'Not authenticated' });
+    return;
+  }
+
+  const user = await authService.findUserById(userId);
+
+  res.status(200).json({
+    success: true,
+    data: {
+      id: user.id,
+      tenant_id: user.tenant_id,
+      email: user.email,
+      phone: user.phone,
+      account_type: user.account_type,
+      organization_name: user.organization_name,
+      first_name: user.first_name,
+      last_name: user.last_name,
+      tier: user.tier,
+      daily_sms_limit: user.daily_sms_limit,
+      signup_status: user.signup_status,
+      created_at: user.created_at,
     },
   });
 });

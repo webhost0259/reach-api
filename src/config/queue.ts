@@ -1,6 +1,6 @@
 import Queue, { Job, JobOptions } from 'bull';
 import logger from '../utils/logger';
-import { QueueJobData } from '../types';
+import { QueueJobData } from '../types/message.types';
 
 const queueConfig = {
   redis: {

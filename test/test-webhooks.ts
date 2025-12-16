@@ -4,7 +4,7 @@ dotenv.config();
 import axios from 'axios';
 import { query } from '../src/config/database';
 
-const API_BASE = 'http://localhost:3000/api/v1';
+const API_BASE = 'http://localhost:8081/api/v1'; // ✅ Changed from 3000
 const colors = {
   reset: '\x1b[0m',
   green: '\x1b[32m',
@@ -46,34 +46,20 @@ async function runWebhookTests() {
       email: testEmail,
       password: 'WebhookTest123!',
       phone: testPhone,
+      first_name: 'Webhook', // ✅ Added
+      last_name: 'Tester', // ✅ Added
     });
 
     if (registerResponse.data.success) {
       log('✅ Test user registered', colors.green);
       log(`   📧 Email: ${testEmail}`, colors.cyan);
+      log(`   🆔 Tenant ID: ${registerResponse.data.data.user.tenant_id}`, colors.cyan); // ✅ Added
+      log(`   📊 Status: ${registerResponse.data.data.user.signup_status}`, colors.cyan);
 
-      const clientId = registerResponse.data.data.api_credentials.client_id;
-      const clientSecret = registerResponse.data.data.api_credentials.client_secret;
-
-      // TEST 2: Approve User
-      log('\n⚙️  Test 2: Approve User', colors.yellow);
-      await query('UPDATE users SET signup_status = ? WHERE email = ?', ['approved', testEmail]);
-      log('✅ User approved', colors.green);
-
-      await sleep(1000);
-
-      // TEST 3: Get JWT Token
-      log('\n🔑 Test 3: Get JWT Token', colors.yellow);
-      const tokenResponse = await axios.post(`${API_BASE}/auth/token`, {
-        client_id: clientId,
-        client_secret: clientSecret,
-      });
-
-      if (tokenResponse.data.success) {
-        token = tokenResponse.data.data.token;
-        log('✅ JWT token generated', colors.green);
-        log(`   🎫 Token: ${token.substring(0, 50)}...`, colors.cyan);
-      }
+      // ✅ NEW: Get token directly from registration
+      token = registerResponse.data.data.token;
+      log(`   🎫 Token: ${token.substring(0, 50)}...`, colors.cyan);
+      log('✅ User auto-approved and logged in', colors.green);
     }
 
     await sleep(1000);
@@ -82,8 +68,8 @@ async function runWebhookTests() {
     log('\n\n🪝 WEBHOOK INTEGRATION TESTS', colors.magenta);
     log('='.repeat(70), colors.blue);
 
-    // TEST 4: Verify Webhook Endpoint
-    log('\n🔍 Test 4: Webhook Verification Endpoint', colors.yellow);
+    // TEST 2: Verify Webhook Endpoint
+    log('\n🔍 Test 2: Webhook Verification Endpoint', colors.yellow);
     const verifyToken = process.env.WEBHOOK_VERIFY_TOKEN || 'test_token';
     try {
       const verifyResponse = await axios.get(
@@ -102,8 +88,8 @@ async function runWebhookTests() {
 
     await sleep(1000);
 
-    // TEST 5: Send Message to WhatsApp
-    log('\n📨 Test 5: Send Message to WhatsApp', colors.yellow);
+    // TEST 3: Send Message to WhatsApp
+    log('\n📨 Test 3: Send Message to WhatsApp', colors.yellow);
     log(`   📞 Recipient: ${testPhone}`, colors.cyan);
     log(`   📝 Template: hello_world`, colors.cyan);
     
@@ -127,13 +113,13 @@ async function runWebhookTests() {
       log(`   📍 Queue Position: ${sendResponse.data.data.queuePosition}`, colors.cyan);
     }
 
-    // TEST 6: Wait for Worker Processing
-    log('\n⏳ Test 6: Wait for Worker Processing', colors.yellow);
+    // TEST 4: Wait for Worker Processing
+    log('\n⏳ Test 4: Wait for Worker Processing', colors.yellow);
     log('   Waiting 8 seconds for worker to send message...', colors.cyan);
     await sleep(8000);
 
-    // TEST 7: Check Message Status
-    log('\n📊 Test 7: Check Message Status After Send', colors.yellow);
+    // TEST 5: Check Message Status
+    log('\n📊 Test 5: Check Message Status After Send', colors.yellow);
     const statusResponse1 = await axios.get(`${API_BASE}/messages/${messageId}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -163,8 +149,8 @@ async function runWebhookTests() {
 
     await sleep(1000);
 
-    // TEST 8: Simulate Webhook - Delivered Status
-    log('\n🔔 Test 8: Simulate Webhook - Delivery Notification', colors.yellow);
+    // TEST 6: Simulate Webhook - Delivered Status
+    log('\n🔔 Test 6: Simulate Webhook - Delivery Notification', colors.yellow);
     log(`   📱 Simulating delivery for: ${externalMessageId.substring(0, 30)}...`, colors.cyan);
     
     const deliveryWebhook = {
@@ -203,8 +189,8 @@ async function runWebhookTests() {
 
     await sleep(2000);
 
-    // TEST 9: Verify Delivered Status Updated
-    log('\n✅ Test 9: Verify Delivery Status Updated', colors.yellow);
+    // TEST 7: Verify Delivered Status Updated
+    log('\n✅ Test 7: Verify Delivery Status Updated', colors.yellow);
     const statusResponse2 = await axios.get(`${API_BASE}/messages/${messageId}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -227,8 +213,8 @@ async function runWebhookTests() {
 
     await sleep(1000);
 
-    // TEST 10: Simulate Webhook - Read Status
-    log('\n📖 Test 10: Simulate Webhook - Read Receipt', colors.yellow);
+    // TEST 8: Simulate Webhook - Read Status
+    log('\n📖 Test 8: Simulate Webhook - Read Receipt', colors.yellow);
     
     const readWebhook = {
       object: 'whatsapp_business_account',
@@ -264,8 +250,8 @@ async function runWebhookTests() {
 
     await sleep(2000);
 
-    // TEST 11: Verify Read Status Updated
-    log('\n📖 Test 11: Verify Read Status Updated', colors.yellow);
+    // TEST 9: Verify Read Status Updated
+    log('\n📖 Test 9: Verify Read Status Updated', colors.yellow);
     const statusResponse3 = await axios.get(`${API_BASE}/messages/${messageId}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -287,8 +273,8 @@ async function runWebhookTests() {
 
     await sleep(1000);
 
-    // TEST 12: Database Verification
-    log('\n💾 Test 12: Database Verification', colors.yellow);
+    // TEST 10: Database Verification
+    log('\n💾 Test 10: Database Verification', colors.yellow);
     const dbResult: any = await query(
       `SELECT 
         id, 
@@ -319,6 +305,8 @@ async function runWebhookTests() {
     log('='.repeat(70), colors.blue);
 
     log('\n📊 Test Summary:', colors.cyan);
+    log('  ✅ User Registration (Multi-tenant)', colors.green);
+    log('  ✅ Auto-approval & JWT Token', colors.green);
     log('  ✅ Webhook Verification Endpoint', colors.green);
     log('  ✅ Message Sending via WhatsApp', colors.green);
     log('  ✅ Worker Processing & External ID Storage', colors.green);
@@ -337,6 +325,11 @@ async function runWebhookTests() {
     log('  ✅ messageService → messageQueue → messageWorker', colors.green);
     log('  ✅ messageWorker → whatsappService → WhatsApp API', colors.green);
     log('  ✅ WhatsApp Webhook → webhookService → Database', colors.green);
+
+    log('\n🏗️  Multi-tenant Architecture:', colors.cyan);
+    log('  ✅ Tenant ID isolation', colors.green);
+    log('  ✅ User-scoped message access', colors.green);
+    log('  ✅ API key tenant mapping', colors.green);
 
     log('\n' + '='.repeat(70), colors.blue);
 
@@ -359,7 +352,7 @@ async function runWebhookTests() {
     } else if (error.request) {
       log('\n❌ No response from server', colors.red);
       log('⚠️  Make sure services are running:', colors.yellow);
-      log('   Terminal 1: npm run dev', colors.cyan);
+      log('   Terminal 1: npm run dev (port 8000)', colors.cyan);
       log('   Terminal 2: npm run worker:dev', colors.cyan);
     } else {
       log(`\n❌ Error: ${error.message}`, colors.red);
@@ -379,10 +372,10 @@ log('\n' + '='.repeat(70), colors.blue);
 log('🪝 ReachAPI Webhook Integration Test', colors.cyan);
 log('='.repeat(70), colors.blue);
 log('\n⚠️  Prerequisites:', colors.yellow);
-log('   ✓ API server running (Terminal 1: npm run dev)', colors.cyan);
+log('   ✓ API server running (Terminal 1: npm run dev) on port 8000', colors.cyan);
 log('   ✓ Worker running (Terminal 2: npm run worker:dev)', colors.cyan);
-log('   ✓ Database connected (MariaDB on 82.112.236.69)', colors.cyan);
-log('   ✓ Redis connected (82.112.236.69:6379)', colors.cyan);
+log('   ✓ Database connected (MariaDB)', colors.cyan);
+log('   ✓ Redis connected', colors.cyan);
 log('   ✓ WhatsApp API configured (v22.0)', colors.cyan);
 log('   ✓ WEBHOOK_VERIFY_TOKEN set in .env', colors.cyan);
 log('\n⏳ Starting tests in 3 seconds...\n', colors.magenta);

@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { register, login, getToken, refreshToken } from '../controllers/authController';
+import { register, login, getToken, refreshToken, getCurrentUser } from '../controllers/authController';
+import { authMiddleware } from '../middleware/authMiddleware';
 
 const router = Router();
 
@@ -119,32 +120,7 @@ const router = Router();
  * @swagger
  * /auth/register:
  *   post:
- *     tags:
- *       - Authentication
- *     summary: Register a new user account
- *     description: |
- *       Create a new ReachAPI user account with API credentials.
- *       
- *       ## Process Flow
- *       1. Provide email and password
- *       2. Account is created with `pending` status
- *       3. You receive `client_id` and `client_secret` (save these securely!)
- *       4. Admin approves your account
- *       5. Use credentials to obtain JWT token
- *       
- *       ## Important Notes
- *       - `client_secret` is shown **only once** during registration
- *       - Store it securely - it cannot be retrieved later
- *       - New accounts start with `free` tier (5 SMS/day limit)
- *       - Account requires admin approval before sending messages
- *       
- *       ## Rate Limiting
- *       - Public endpoint (no authentication required)
- *       - Limited to 10 registrations per IP per hour
- *     operationId: registerUser
- *     security: []
  *     requestBody:
- *       required: true
  *       content:
  *         application/json:
  *           schema:
@@ -156,115 +132,47 @@ const router = Router();
  *               email:
  *                 type: string
  *                 format: email
- *                 description: Valid email address (must be unique)
- *                 example: "john.doe@company.com"
  *               password:
  *                 type: string
- *                 format: password
  *                 minLength: 8
- *                 description: Strong password (min 8 characters)
- *                 example: "SecurePass123!"
  *               phone:
  *                 type: string
- *                 pattern: '^\+?[1-9]\d{1,14}$'
- *                 description: Phone number in E.164 format (optional)
- *                 example: "+14155552671"
+ *               account_type:
+ *                 type: string
+ *                 enum: [individual, organization]
+ *                 default: individual
+ *               organization_name:
+ *                 type: string
+ *                 description: Required if account_type is organization
+ *               first_name:
+ *                 type: string
+ *               last_name:
+ *                 type: string
+ *               company_size:
+ *                 type: string
+ *                 enum: ['1-10', '11-50', '51-200', '201-500', '500+']
+ *               industry:
+ *                 type: string
+ *               country:
+ *                 type: string
+ *                 default: India
  *           examples:
- *             minimal:
- *               summary: Minimal registration
+ *             individual:
+ *               summary: Individual account
  *               value:
- *                 email: "minimal@example.com"
- *                 password: "password123"
- *             complete:
- *               summary: Complete registration
+ *                 email: "john@example.com"
+ *                 password: "SecurePass123!"
+ *                 first_name: "John"
+ *                 last_name: "Doe"
+ *             organization:
+ *               summary: Organization account
  *               value:
- *                 email: "complete@example.com"
- *                 password: "MySecurePass456!"
- *                 phone: "+14155552671"
- *     responses:
- *       201:
- *         description: User registered successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                   example: true
- *                 message:
- *                   type: string
- *                   example: "User registered successfully. Awaiting approval."
- *                 data:
- *                   type: object
- *                   properties:
- *                     user:
- *                       $ref: '#/components/schemas/User'
- *                     api_credentials:
- *                       $ref: '#/components/schemas/ApiCredentials'
- *             examples:
- *               success:
- *                 summary: Successful registration
- *                 value:
- *                   success: true
- *                   message: "User registered successfully. Awaiting approval."
- *                   data:
- *                     user:
- *                       id: "550e8400-e29b-41d4-a716-446655440000"
- *                       email: "john@example.com"
- *                       tier: "free"
- *                       signup_status: "pending"
- *                       daily_sms_limit: 5
- *                       created_at: "2025-10-11T20:00:00Z"
- *                     api_credentials:
- *                       client_id: "client_abc123def456ghi789"
- *                       client_secret: "secret_xyz789uvw012rst345"
- *                       environment: "test"
- *       400:
- *         description: Invalid input or validation error
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ValidationError'
- *             examples:
- *               emailExists:
- *                 summary: Email already registered
- *                 value:
- *                   success: false
- *                   error: "Email already registered"
- *                   code: "AUTH_EMAIL_EXISTS"
- *               invalidEmail:
- *                 summary: Invalid email format
- *                 value:
- *                   success: false
- *                   error: "Validation failed"
- *                   details:
- *                     - field: "email"
- *                       message: "Invalid email format"
- *               weakPassword:
- *                 summary: Password too weak
- *                 value:
- *                   success: false
- *                   error: "Validation failed"
- *                   details:
- *                     - field: "password"
- *                       message: "Password must be at least 8 characters"
- *       429:
- *         description: Too many registration attempts
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/Error'
- *             example:
- *               success: false
- *               error: "Too many registration attempts. Please try again later."
- *               code: "RATE_LIMIT_EXCEEDED"
- *       500:
- *         description: Internal server error
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/Error'
+ *                 email: "admin@company.com"
+ *                 password: "SecurePass123!"
+ *                 account_type: "organization"
+ *                 organization_name: "Acme Corp"
+ *                 company_size: "51-200"
+ *                 industry: "Technology"
  */
 router.post('/register', register);
 
@@ -587,6 +495,21 @@ router.post('/token', getToken);
  *                   error: "Invalid token"
  *                   code: "AUTH_INVALID_TOKEN"
  */
-router.post('/refresh', refreshToken);
+router.post('/refresh', authMiddleware, refreshToken);
+
+/**
+ * @swagger
+ * /auth/me:
+ *   get:
+ *     tags:
+ *       - Authentication
+ *     summary: Get current authenticated user
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Current user details
+ */
+router.get('/me', authMiddleware, getCurrentUser);
 
 export default router;

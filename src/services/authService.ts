@@ -1,170 +1,247 @@
-import bcrypt from 'bcryptjs';
-import jwt, { SignOptions } from 'jsonwebtoken';
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
-import { query, queryOne } from '../config/database';
-import { IUser, IApiKey, JwtPayload } from '../types';
-import { AppError } from '../middleware/errorMiddleware';
+import crypto from 'crypto';
+import { query as executeQuery} from '../config/database';
+import { IUser, IApiKey, RegisterRequest, JWTPayload } from '../types';
 
-export class AuthService {
+class AuthService {
+  private JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+  private JWT_EXPIRES_IN = '24h';
+
   /**
-   * Register a new user
+   * Register new user with multi-tenant support
    */
-  async register(
-    email: string,
-    password: string,
-    phone?: string
-  ): Promise<{
-    user: IUser;
-    apiKey: IApiKey & { client_secret_plain: string };
-  }> {
-    // Check if user exists
-    const existingUser = await queryOne<IUser>('SELECT * FROM users WHERE email = ?', [email]);
+  async register(data: RegisterRequest) {
+    const { email, password, phone, account_type = 'individual', organization_name, first_name, last_name, company_size, industry, country = 'India' } = data;
 
+    // Check if email exists
+    const existingUser = await this.findUserByEmail(email);
     if (existingUser) {
-      throw new AppError('Email already registered', 400);
+      throw new Error('Email already registered');
     }
 
-    // Hash password
-    const password_hash = await bcrypt.hash(password, 10);
+    // Validate organization_name if account_type is organization
+    if (account_type === 'organization' && !organization_name) {
+      throw new Error('Organization name is required for organization accounts');
+    }
+
+    // Generate unique IDs
     const userId = uuidv4();
+    const tenant_id = uuidv4();
+    const passwordHash = await bcrypt.hash(password, 10);
 
-    // Insert user
-    await query(
-      `INSERT INTO users (id, email, password_hash, phone, signup_status, tier, daily_sms_limit) 
-       VALUES (?, ?, ?, ?, 'pending', 'free', 5)`,
-      [userId, email, password_hash, phone || null]
-    );
+    // Auto-approve for now
+    const signup_status = 'approved';
+    const approved_at = new Date();
 
-    // Generate API key
-    const client_id = `client_${uuidv4().replace(/-/g, '')}`;
-    const client_secret = `secret_${uuidv4().replace(/-/g, '')}`;
-    const client_secret_hash = await bcrypt.hash(client_secret, 10);
-    const apiKeyId = uuidv4();
+    // Create user
+    const userQuery = `
+      INSERT INTO users (
+        id, tenant_id, email, password_hash, phone, 
+        account_type, organization_name, first_name, last_name,
+        company_size, industry, country, signup_status, approved_at,
+        tier, daily_sms_limit
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'free', 5)
+    `;
 
-    await query(
-      `INSERT INTO api_keys (id, user_id, client_id, client_secret_hash, environment, status) 
-       VALUES (?, ?, ?, ?, 'test', 'active')`,
-      [apiKeyId, userId, client_id, client_secret_hash]
-    );
+    await executeQuery(userQuery, [
+      userId,
+      tenant_id,
+      email,
+      passwordHash,
+      phone || null,
+      account_type,
+      organization_name || null,
+      first_name || null,
+      last_name || null,
+      company_size || null,
+      industry || null,
+      country,
+      signup_status,
+      approved_at,
+    ]);
 
-    const user = await queryOne<IUser>('SELECT * FROM users WHERE id = ?', [userId]);
-    const apiKey = await queryOne<IApiKey>('SELECT * FROM api_keys WHERE id = ?', [apiKeyId]);
+    // Get created user
+    const user = await this.findUserById(userId);
 
-    if (!user || !apiKey) {
-      throw new AppError('Failed to create user', 500);
-    }
+    // Create API keys (test and production)
+    const testKey = await this.createApiKey(userId, tenant_id, 'test');
+    const prodKey = await this.createApiKey(userId, tenant_id, 'prod');
+
+    // Generate JWT token for immediate login
+    const token = this.generateToken({
+      id: user.id,              // ✅ Changed from userId to id
+      tenant_id: user.tenant_id,
+      email: user.email,
+      tier: user.tier,
+    });
 
     return {
       user,
-      apiKey: { ...apiKey, client_secret_plain: client_secret },
+      apiKeys: {
+        test: testKey,
+        production: prodKey,
+      },
+      token,
     };
   }
 
   /**
    * Login with email and password
    */
-  async login(email: string, password: string): Promise<{ token: string; user: IUser }> {
-    const user = await queryOne<IUser>('SELECT * FROM users WHERE email = ?', [email]);
-
+  async login(email: string, password: string) {
+    const user = await this.findUserByEmail(email);
+    
     if (!user) {
-      throw new AppError('Invalid credentials', 401);
+      throw new Error('Invalid credentials');
     }
 
-    const isValidPassword = await bcrypt.compare(password, user.password_hash);
-
+    // Verify password
+    const isValidPassword = await bcrypt.compare(password, user.password_hash!);
     if (!isValidPassword) {
-      throw new AppError('Invalid credentials', 401);
+      throw new Error('Invalid credentials');
     }
 
+    // Check approval status
     if (user.signup_status !== 'approved') {
-      throw new AppError('Account not approved yet', 403);
+      throw new Error(`Account is ${user.signup_status}`);
     }
 
-    const token = this.generateToken(user);
-
-    return { token, user };
-  }
-
-  /**
-   * Authenticate with client_id and client_secret
-   */
-  async authenticateApiKey(
-    client_id: string,
-    client_secret: string
-  ): Promise<{ token: string; user: IUser }> {
-    const apiKey = await queryOne<IApiKey>(
-      'SELECT * FROM api_keys WHERE client_id = ? AND status = "active"',
-      [client_id]
-    );
-
-    if (!apiKey) {
-      throw new AppError('Invalid API credentials', 401);
-    }
-
-    const isValidSecret = await bcrypt.compare(client_secret, apiKey.client_secret_hash);
-
-    if (!isValidSecret) {
-      throw new AppError('Invalid API credentials', 401);
-    }
-
-    const user = await queryOne<IUser>('SELECT * FROM users WHERE id = ?', [apiKey.user_id]);
-
-    if (!user || user.signup_status !== 'approved') {
-      throw new AppError('Account not active', 403);
-    }
-
-    const token = this.generateToken(user);
-
-    return { token, user };
-  }
-
-  /**
-   * Refresh token - generate new token from existing valid token
-   */
-  async refreshTokenFromUser(userId: string): Promise<string> {
-    const user = await queryOne<IUser>('SELECT * FROM users WHERE id = ?', [userId]);
-
-    if (!user || user.signup_status !== 'approved') {
-      throw new AppError('Account not active', 403);
-    }
-
-    return this.generateToken(user);
-  }
-
- /**
- * Generate JWT token
- */
-  private generateToken(user: IUser): string {
-    const payload: JwtPayload = {
-      userId: user.id,
+    // Generate token
+    const token = this.generateToken({
+      id: user.id,              // ✅ Changed from userId to id
+      tenant_id: user.tenant_id,
       email: user.email,
       tier: user.tier,
-    };
+    });
 
-    const secret = process.env.JWT_SECRET;
-    if (!secret) {
-      throw new AppError('JWT_SECRET not configured', 500);
+    return { token, user };
+  }
+
+  /**
+   * Authenticate with API credentials (client_id/client_secret)
+   */
+  async authenticateApiKey(client_id: string, client_secret: string) {
+    // Find API key
+    const query = 'SELECT * FROM api_keys WHERE client_id = ? AND status = "active"';
+    const results = await executeQuery(query, [client_id]);
+
+    if (!results || results.length === 0) {
+      throw new Error('Invalid API credentials');
     }
 
-    return jwt.sign(payload, secret, {
-      expiresIn: process.env.JWT_EXPIRES_IN || '24h',
-    } as SignOptions);
+    const apiKey = results[0];
+
+    // Verify secret
+    const isValid = await bcrypt.compare(client_secret, apiKey.client_secret_hash);
+    if (!isValid) {
+      throw new Error('Invalid API credentials');
+    }
+
+    // Get user
+    const user = await this.findUserById(apiKey.user_id);
+
+    // Check approval
+    if (user.signup_status !== 'approved') {
+      throw new Error('Account not approved');
+    }
+
+    // Generate token
+    const token = this.generateToken({
+      id: user.id,              // ✅ Changed from userId to id
+      tenant_id: user.tenant_id,
+      email: user.email,
+      tier: user.tier,
+    });
+
+    return { token, user };
+  }
+
+  /**
+   * Generate JWT token
+   */
+  generateToken(payload: JWTPayload): string {
+    return jwt.sign(
+      payload, 
+      this.JWT_SECRET, 
+      { expiresIn: this.JWT_EXPIRES_IN } as jwt.SignOptions
+    );
   }
 
   /**
    * Verify JWT token
    */
-  verifyToken(token: string): JwtPayload {
+  verifyToken(token: string): JWTPayload {
     try {
-      const secret = process.env.JWT_SECRET;
-      if (!secret) {
-        throw new AppError('JWT_SECRET not configured', 500);
-      }
-
-      return jwt.verify(token, secret) as JwtPayload;
+      return jwt.verify(token, this.JWT_SECRET) as JWTPayload;
     } catch (error) {
-      throw new AppError('Invalid or expired token', 401);
+      throw new Error('Invalid or expired token');
     }
+  }
+
+  /**
+   * Refresh token
+   */
+  async refreshTokenFromUser(userId: string): Promise<string> {
+    const user = await this.findUserById(userId);
+
+    if (user.signup_status !== 'approved') {
+      throw new Error('Account not approved');
+    }
+
+    return this.generateToken({
+      id: user.id,              // ✅ Changed from userId to id
+      tenant_id: user.tenant_id,
+      email: user.email,
+      tier: user.tier,
+    });
+  }
+
+  /**
+   * Create API key
+   */
+  private async createApiKey(user_id: string, tenant_id: string, environment: 'test' | 'prod'): Promise<IApiKey> {
+    const id = uuidv4();
+    const client_id = `client_${environment}_${crypto.randomBytes(16).toString('hex')}`;
+    const client_secret = `secret_${environment}_${crypto.randomBytes(32).toString('hex')}`;
+    const client_secret_hash = await bcrypt.hash(client_secret, 10);
+
+    const query = `
+      INSERT INTO api_keys (id, user_id, tenant_id, client_id, client_secret_hash, environment, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'active')
+    `;
+
+    await executeQuery(query, [id, user_id, tenant_id, client_id, client_secret_hash, environment]);
+
+    return {
+      id,
+      user_id,
+      tenant_id,
+      client_id,
+      client_secret_hash,
+      client_secret_plain: client_secret,
+      environment,
+      status: 'active',
+      created_at: new Date(),
+    };
+  }
+
+  async findUserById(id: string): Promise<IUser> {
+    const query = 'SELECT * FROM users WHERE id = ?';
+    const results = await executeQuery(query, [id]);
+
+    if (!results || results.length === 0) {
+      throw new Error('User not found');
+    }
+
+    return results[0];
+  }
+
+  async findUserByEmail(email: string): Promise<IUser | null> {
+    const query = 'SELECT * FROM users WHERE email = ?';
+    const results = await executeQuery(query, [email]);
+    return results && results.length > 0 ? results[0] : null;
   }
 }
 
