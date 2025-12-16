@@ -7,6 +7,9 @@ import templateRoutes from './templateRoutes';
 import settingsRoutes from './settingsRoutes';
 import whatsappConfigRoutes from './whatsappConfigRoutes';
 import campaignRoutes from './campaignRoutes';
+import customerRoutes from './customerRoutes';
+import customerGroupRoutes from './customerGroupRoutes';
+
 
 const router = Router();
 
@@ -19,5 +22,7 @@ router.use('/templates', templateRoutes);
 router.use('/settings', settingsRoutes);
 router.use('/whatsapp-config', whatsappConfigRoutes);
 router.use('/campaigns', campaignRoutes);
+router.use('/customers', customerRoutes);
+router.use('/customer-groups', customerGroupRoutes);
 
 export default router;
