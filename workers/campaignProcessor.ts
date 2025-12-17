@@ -18,9 +18,9 @@ export async function processCampaign(job: Job<CampaignJobData>): Promise<void> 
   logger.info('📤 Processing campaign', { campaign_id, tenant_id });
 
   try {
-    // 1. Get campaign details
+    // 1. Get campaign details with template variables
     const campaign = await queryOne<any>(
-      `SELECT c.*, t.template_code, t.language, t.body_text
+      `SELECT c.*, t.template_code, t.language, t.body_text, t.header_type, t.header_content
        FROM campaigns c
        LEFT JOIN message_templates t ON c.template_id = t.id
        WHERE c.id = ? AND c.tenant_id = ?`,
@@ -47,9 +47,8 @@ export async function processCampaign(job: Job<CampaignJobData>): Promise<void> 
       return;
     }
 
-    // 2. Get WhatsApp config (with automatic decryption) ✅
+    // 2. Get WhatsApp config
     logger.info('📡 Fetching WhatsApp configuration...', { tenant_id });
-    
     const whatsappConfig = await whatsappConfigService.getActiveConfig(tenant_id);
 
     logger.info('✅ WhatsApp config loaded', { 
@@ -67,7 +66,7 @@ export async function processCampaign(job: Job<CampaignJobData>): Promise<void> 
 
     logger.info('✅ Campaign status → sending', { campaign_id });
 
-    // 4. Get recipients
+    // 4. Get recipients with their variables
     const recipients = await query<any[]>(
       `SELECT * FROM campaign_recipients
        WHERE campaign_id = ?
@@ -89,6 +88,18 @@ export async function processCampaign(job: Job<CampaignJobData>): Promise<void> 
 
     logger.info(`📦 Processing ${recipients.length} recipients`, { campaign_id });
 
+    // ✅ Parse template_variables from campaign
+    let templateVariablesConfig = null;
+    try {
+      if (campaign.template_variables) {
+        templateVariablesConfig = typeof campaign.template_variables === 'string'
+          ? JSON.parse(campaign.template_variables)
+          : campaign.template_variables;
+      }
+    } catch (e) {
+      logger.error('Failed to parse template_variables', { error: e });
+    }
+
     const batchSize = campaign.send_rate || 10;
     const delayMs = 60000 / batchSize;
 
@@ -102,8 +113,76 @@ export async function processCampaign(job: Job<CampaignJobData>): Promise<void> 
           [recipient.id]
         );
 
-        // Build WhatsApp message payload
-        const messagePayload = {
+        // ✅ Parse recipient variables
+        let recipientVariables: Record<string, string> = {};
+        try {
+          recipientVariables = typeof recipient.variables === 'string'
+            ? JSON.parse(recipient.variables)
+            : recipient.variables || {};
+        } catch (e) {
+          logger.error('Failed to parse recipient variables', { 
+            recipient_id: recipient.id,
+            error: e 
+          });
+        }
+
+        // ✅ Build template components with parameters
+        const templateComponents: any[] = [];
+
+        // Add header component if exists
+        if (campaign.header_type && campaign.header_type !== 'none') {
+          if (campaign.header_type === 'text' && templateVariablesConfig?.header) {
+            // Header has variables
+            const headerParams = templateVariablesConfig.header.map((param: any) => ({
+              type: 'text',
+              text: recipientVariables[param.name] || param.sample || ''
+            }));
+            
+            templateComponents.push({
+              type: 'header',
+              parameters: headerParams
+            });
+          }
+        }
+
+        // ✅ Add body component with parameters
+        if (templateVariablesConfig?.body && templateVariablesConfig.body.length > 0) {
+          const bodyParams = templateVariablesConfig.body
+            .sort((a: any, b: any) => a.position - b.position)
+            .map((param: any) => ({
+              type: 'text',
+              text: recipientVariables[param.name] || param.sample || ''
+            }));
+
+          templateComponents.push({
+            type: 'body',
+            parameters: bodyParams
+          });
+
+          logger.info('📝 Template parameters prepared', {
+            campaign_id,
+            recipient: recipient.phone_number,
+            params: bodyParams.map((p: { text: any; }) => p.text),
+          });
+        }
+
+        // Add button component if exists
+        if (templateVariablesConfig?.button && templateVariablesConfig.button.length > 0) {
+          const buttonParams = templateVariablesConfig.button.map((param: any) => ({
+            type: 'text',
+            text: recipientVariables[param.name] || param.sample || ''
+          }));
+          
+          templateComponents.push({
+            type: 'button',
+            sub_type: 'url',
+            index: 0,
+            parameters: buttonParams
+          });
+        }
+
+        // ✅ Build WhatsApp message payload with components
+        const messagePayload: any = {
           messaging_product: 'whatsapp',
           to: recipient.phone_number,
           type: 'template',
@@ -115,12 +194,19 @@ export async function processCampaign(job: Job<CampaignJobData>): Promise<void> 
           },
         };
 
+        // Only add components if there are any
+        if (templateComponents.length > 0) {
+          messagePayload.template.components = templateComponents;
+        }
+
         logger.info(`📤 Sending to ${recipient.phone_number}...`, {
           campaign_id,
           template: campaign.template_code,
+          components: templateComponents.length,
+          payload: JSON.stringify(messagePayload, null, 2),
         });
 
-        // ✅ Send via WhatsApp API (token is already decrypted)
+        // ✅ Send via WhatsApp API
         const response = await axios.post(
           `https://graph.facebook.com/v21.0/${whatsappConfig.phoneNumberId}/messages`,
           messagePayload,
@@ -224,29 +310,35 @@ export async function processCampaign(job: Job<CampaignJobData>): Promise<void> 
       [campaign_id]
     );
 
-    // 7. Create analytics snapshot
+    // 7. Get final counts for logging
+    const finalCampaign = await queryOne<any>(
+      'SELECT sent_count, failed_count, total_recipients FROM campaigns WHERE id = ?',
+      [campaign_id]
+    );
+
+    // 8. Create analytics snapshot
     try {
       await query('CALL sp_create_campaign_snapshot(?)', [campaign_id]);
     } catch (error) {
       logger.warn('Failed to create analytics snapshot', { error });
     }
 
-    // 8. Log completion
+    // 9. Log completion
     await query(
       `INSERT INTO campaign_logs (id, campaign_id, event_type, message, created_at)
        VALUES (?, ?, 'completed', ?, NOW())`,
       [
         uuidv4(), 
         campaign_id, 
-        `Campaign completed. Sent: ${campaign.sent_count}, Failed: ${campaign.failed_count}`
+        `Campaign completed. Sent: ${finalCampaign?.sent_count || 0}, Failed: ${finalCampaign?.failed_count || 0}`
       ]
     );
 
     logger.info('🎉 Campaign completed successfully', {
       campaign_id,
-      total: campaign.total_recipients,
-      sent: campaign.sent_count,
-      failed: campaign.failed_count,
+      total: finalCampaign?.total_recipients || 0,
+      sent: finalCampaign?.sent_count || 0,
+      failed: finalCampaign?.failed_count || 0,
     });
 
   } catch (error: any) {

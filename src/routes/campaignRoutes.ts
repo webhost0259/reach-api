@@ -56,6 +56,20 @@ router.use(authenticate);
  *               template_id:
  *                 type: string
  *                 format: uuid
+ *               template_variables:
+ *                 type: object
+ *                 properties:
+ *                   body:
+ *                     type: array
+ *                     items:
+ *                       type: object
+ *                       properties:
+ *                         position:
+ *                           type: integer
+ *                         name:
+ *                           type: string
+ *                         sample:
+ *                           type: string
  *               recipients:
  *                 type: array
  *                 minItems: 1
@@ -72,7 +86,7 @@ router.use(authenticate);
  *                       format: uuid
  *                     variables:
  *                       type: object
- *                       example: { "name": "John", "discount": "20%" }
+ *                       example: { "param_1": "John Doe", "param_2": "20%" }
  *               scheduled_at:
  *                 type: string
  *                 format: date-time
@@ -103,8 +117,21 @@ router.post(
   [
     body('name').trim().notEmpty().withMessage('Campaign name is required'),
     body('template_id').isUUID().withMessage('Valid template_id is required'),
+    // ✅ ADD VALIDATION FOR template_variables (optional)
+    body('template_variables')
+      .optional()
+      .isObject()
+      .withMessage('template_variables must be an object'),
+    body('template_variables.body')
+      .optional()
+      .isArray()
+      .withMessage('template_variables.body must be an array'),
     body('recipients').isArray({ min: 1 }).withMessage('At least one recipient is required'),
     body('recipients.*.phone_number').notEmpty().withMessage('Phone number is required for each recipient'),
+    body('recipients.*.variables')
+      .optional()
+      .isObject()
+      .withMessage('Recipient variables must be an object'),
     body('send_rate').optional().isInt({ min: 1, max: 100 }).withMessage('Send rate must be between 1 and 100'),
     body('max_retries').optional().isInt({ min: 0, max: 10 }).withMessage('Max retries must be between 0 and 10'),
     validate,

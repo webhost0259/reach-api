@@ -7,7 +7,17 @@ class CampaignController {
   async createCampaign(req: Request, res: Response) {
     try {
       const { tenant_id, user_id } = (req as any).user;
-      const { name, description, template_id, recipients, scheduled_at, send_rate, retry_failed, max_retries } = req.body;
+      const { 
+        name, 
+        description, 
+        template_id, 
+        template_variables,  // ✅ ADD THIS
+        recipients, 
+        scheduled_at, 
+        send_rate, 
+        retry_failed, 
+        max_retries 
+      } = req.body;
 
       const campaign = await campaignService.createCampaign({
         tenant_id,
@@ -15,6 +25,7 @@ class CampaignController {
         name,
         description,
         template_id,
+        template_variables,  // ✅ ADD THIS
         recipients,
         scheduled_at: scheduled_at ? new Date(scheduled_at) : undefined,
         send_rate,

@@ -13,6 +13,8 @@ export interface Campaign {
   template_id: string;
   template_name?: string;
   template_code?: string;
+  template_variables?: any;
+  template_variables_count?: number;
   status: string;
   total_recipients: number;
   pending_count: number;
@@ -49,174 +51,228 @@ export interface CampaignRecipient {
 }
 
 export class CampaignService {
+  // Helper method to extract template parameter count
+  private extractTemplateParamCount(templateBody: string): number {
+    if (!templateBody) return 0;
+    const regex = /\{\{(\d+)\}\}/g;
+    const matches = [...templateBody.matchAll(regex)];
+    return matches.length;
+  }
+
   // Create campaign with recipients
   async createCampaign(data: {
-    tenant_id: string;
-    user_id?: string;
-    name: string;
-    description?: string;
-    template_id: string;
-    recipients: Array<{
-      phone_number: string;
-      customer_id?: string;
-      variables?: Record<string, any>;
-    }>;
-    scheduled_at?: Date;
-    send_rate?: number;
-    retry_failed?: boolean;
-    max_retries?: number;
-  }): Promise<Campaign> {
-    const connection = await getConnection();
-
-    try {
-      await connection.beginTransaction();
-
-      // Verify template exists and is approved
-      const template = await queryOne<any>(
-        `SELECT id, status, name, template_code FROM message_templates 
-         WHERE id = ? AND tenant_id = ? AND status = 'approved'`,
-        [data.template_id, data.tenant_id]
-      );
-
-      if (!template) {
-        throw new Error('Template not found or not approved');
-      }
-
-      // ✅ Validate and format all phone numbers
-      const validatedRecipients: Array<{
+      tenant_id: string;
+      user_id?: string;
+      name: string;
+      description?: string;
+      template_id: string;
+      template_variables?: {
+        body?: Array<{ position: number; name: string; sample: string }>;
+        header?: Array<{ position: number; name: string; sample: string }>;
+        button?: Array<{ position: number; name: string; sample: string }>;
+      };
+      recipients: Array<{
         phone_number: string;
         customer_id?: string;
-        variables: Record<string, any>;
-      }> = [];
-      const invalidNumbers: Array<{ phone: string; error: string }> = [];
+        variables?: Record<string, any>;
+      }>;
+      scheduled_at?: Date;
+      send_rate?: number;
+      retry_failed?: boolean;
+      max_retries?: number;
+    }): Promise<Campaign> {
+      const connection = await getConnection();
 
-      for (const recipient of data.recipients) {
-        const validation = PhoneNumberValidator.validate(recipient.phone_number);
-        
-        if (validation.isValid) {
-          validatedRecipients.push({
-            phone_number: validation.formatted, // ✅ Use formatted number
-            customer_id: recipient.customer_id,
-            variables: recipient.variables || {},
-          });
-        } else {
-          invalidNumbers.push({
-            phone: recipient.phone_number,
-            error: validation.error || 'Invalid format',
-          });
-          logger.warn('Invalid phone number in campaign', {
-            phone: recipient.phone_number,
-            error: validation.error,
+      try {
+        await connection.beginTransaction();
+
+        // ✅ FIXED: Use actual column names from your schema
+        const template = await queryOne<any>(
+          `SELECT id, status, name, template_code, language, category,
+                  header_type, header_content, body_text, footer_text, buttons
+          FROM message_templates 
+          WHERE id = ? AND tenant_id = ? AND status = 'approved'`,
+          [data.template_id, data.tenant_id]
+        );
+
+        if (!template) {
+          throw new Error('Template not found or not approved');
+        }
+
+        // ✅ Extract and validate template parameter count using body_text
+        const templateParamCount = this.extractTemplateParamCount(template.body_text || '');
+
+        // ✅ Validate template_variables provided if template has parameters
+        if (templateParamCount > 0 && !data.template_variables?.body) {
+          throw new Error(
+            `Template requires ${templateParamCount} parameters. Please provide template_variables.`
+          );
+        }
+
+        // ✅ Validate parameter count matches
+        if (templateParamCount > 0) {
+          const providedParamCount = data.template_variables?.body?.length || 0;
+          if (providedParamCount !== templateParamCount) {
+            throw new Error(
+              `Template parameter mismatch: expected ${templateParamCount}, got ${providedParamCount}`
+            );
+          }
+        }
+
+        // ✅ Validate and format all phone numbers BEFORE creating campaign
+        const validatedRecipients: Array<{
+          phone_number: string;
+          customer_id?: string;
+          variables: Record<string, any>;
+        }> = [];
+        const invalidNumbers: Array<{ phone: string; error: string }> = [];
+
+        for (const recipient of data.recipients) {
+          const validation = PhoneNumberValidator.validate(recipient.phone_number);
+          
+          if (validation.isValid) {
+            // ✅ Validate recipient has all required template variables
+            if (data.template_variables?.body) {
+              const requiredParams = data.template_variables.body.map(p => p.name);
+              const providedParams = Object.keys(recipient.variables || {});
+              const missing = requiredParams.filter(p => !providedParams.includes(p));
+
+              if (missing.length > 0) {
+                invalidNumbers.push({
+                  phone: recipient.phone_number,
+                  error: `Missing variables: ${missing.join(', ')}`,
+                });
+                continue;
+              }
+            }
+
+            validatedRecipients.push({
+              phone_number: validation.formatted,
+              customer_id: recipient.customer_id,
+              variables: recipient.variables || {},
+            });
+          } else {
+            invalidNumbers.push({
+              phone: recipient.phone_number,
+              error: validation.error || 'Invalid format',
+            });
+            logger.warn('Invalid phone number in campaign', {
+              phone: recipient.phone_number,
+              error: validation.error,
+            });
+          }
+        }
+
+        // ✅ Check if we have valid recipients
+        if (validatedRecipients.length === 0) {
+          throw new Error(
+            `No valid phone numbers found. ${invalidNumbers.length} numbers were invalid.`
+          );
+        }
+
+        // ✅ Log if some numbers were skipped
+        if (invalidNumbers.length > 0) {
+          logger.warn('Some phone numbers were invalid and skipped', {
+            campaignName: data.name,
+            invalidCount: invalidNumbers.length,
+            validCount: validatedRecipients.length,
+            invalidNumbers: invalidNumbers.slice(0, 10),
           });
         }
-      }
 
-      // ✅ Check if we have valid recipients
-      if (validatedRecipients.length === 0) {
-        throw new Error(
-          `No valid phone numbers found. ${invalidNumbers.length} numbers were invalid.`
+        // ✅ Create campaign with template variables
+        const campaignId = uuidv4();
+        const status = data.scheduled_at ? 'scheduled' : 'draft';
+
+        await connection.query(
+          `INSERT INTO campaigns (
+            id, tenant_id, user_id, name, description, template_id,
+            template_variables, template_variables_count,
+            status, scheduled_at, send_rate, retry_failed, max_retries,
+            created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+          [
+            campaignId,
+            data.tenant_id,
+            data.user_id || null,
+            data.name,
+            data.description || null,
+            data.template_id,
+            data.template_variables ? JSON.stringify(data.template_variables) : null,
+            templateParamCount,
+            status,
+            data.scheduled_at || null,
+            data.send_rate || 10,
+            data.retry_failed !== false ? 1 : 0,
+            data.max_retries || 3,
+          ]
         );
-      }
 
-      // ✅ Log if some numbers were skipped
-      if (invalidNumbers.length > 0) {
-        logger.warn('Some phone numbers were invalid and skipped', {
-          campaignName: data.name,
+        // ✅ Add VALIDATED recipients in batch
+        if (validatedRecipients.length > 0) {
+          const recipientValues = validatedRecipients.map(() => '(?, ?, ?, ?, ?)').join(', ');
+          const recipientParams = validatedRecipients.flatMap((r) => [
+            uuidv4(),
+            campaignId,
+            r.phone_number,
+            r.customer_id || null,
+            JSON.stringify(r.variables || {}),
+          ]);
+
+          await connection.query(
+            `INSERT INTO campaign_recipients (id, campaign_id, phone_number, customer_id, variables)
+            VALUES ${recipientValues}`,
+            recipientParams
+          );
+
+          // Update campaign counts
+          await connection.query(
+            `UPDATE campaigns 
+            SET total_recipients = ?, pending_count = ?
+            WHERE id = ?`,
+            [validatedRecipients.length, validatedRecipients.length, campaignId]
+          );
+        }
+
+        // ✅ Log creation with validation info
+        const logMessage = invalidNumbers.length > 0
+          ? `Campaign created with ${validatedRecipients.length} valid recipients (${invalidNumbers.length} invalid numbers skipped)`
+          : `Campaign created with ${validatedRecipients.length} recipients`;
+
+        await connection.query(
+          `INSERT INTO campaign_logs (id, campaign_id, event_type, message, user_id, created_at)
+          VALUES (?, ?, 'created', ?, ?, NOW())`,
+          [uuidv4(), campaignId, logMessage, data.user_id]
+        );
+
+        await connection.commit();
+
+        logger.info('Campaign created', {
+          campaignId,
+          recipientCount: validatedRecipients.length,
           invalidCount: invalidNumbers.length,
-          validCount: validatedRecipients.length,
-          invalidNumbers: invalidNumbers.slice(0, 10), // Log first 10
+          tenantId: data.tenant_id,
         });
-      }
 
-      // Create campaign
-      const campaignId = uuidv4();
-      const status = data.scheduled_at ? 'scheduled' : 'draft';
-
-      await connection.query(
-        `INSERT INTO campaigns (
-          id, tenant_id, user_id, name, description, template_id,
-          status, scheduled_at, send_rate, retry_failed, max_retries,
-          created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-        [
-          campaignId,
-          data.tenant_id,
-          data.user_id || null,
-          data.name,
-          data.description || null,
-          data.template_id,
-          status,
-          data.scheduled_at || null,
-          data.send_rate || 10,
-          data.retry_failed !== false ? 1 : 0,
-          data.max_retries || 3,
-        ]
-      );
-
-      // ✅ Add VALIDATED recipients in batch
-      if (validatedRecipients.length > 0) {
-        const recipientValues = validatedRecipients.map(() => '(?, ?, ?, ?, ?)').join(', ');
-        const recipientParams = validatedRecipients.flatMap((r) => [
-          uuidv4(),
-          campaignId,
-          r.phone_number, // ✅ Already formatted
-          r.customer_id || null,
-          JSON.stringify(r.variables || {}),
-        ]);
-
-        await connection.query(
-          `INSERT INTO campaign_recipients (id, campaign_id, phone_number, customer_id, variables)
-           VALUES ${recipientValues}`,
-          recipientParams
+        // Fetch and return the created campaign
+        const campaign = await queryOne<Campaign>(
+          `SELECT c.*, t.name as template_name, t.template_code
+          FROM campaigns c
+          LEFT JOIN message_templates t ON c.template_id = t.id
+          WHERE c.id = ?`,
+          [campaignId]
         );
 
-        // Update campaign counts
-        await connection.query(
-          `UPDATE campaigns 
-           SET total_recipients = ?, pending_count = ?
-           WHERE id = ?`,
-          [validatedRecipients.length, validatedRecipients.length, campaignId]
-        );
+        return campaign!;
+      } catch (error) {
+        await connection.rollback();
+        logger.error('Failed to create campaign', { error, data });
+        throw error;
+      } finally {
+        connection.release();
       }
-
-      // ✅ Log creation with validation info
-      const logMessage = invalidNumbers.length > 0
-        ? `Campaign created with ${validatedRecipients.length} valid recipients (${invalidNumbers.length} invalid numbers skipped)`
-        : `Campaign created with ${validatedRecipients.length} recipients`;
-
-      await connection.query(
-        `INSERT INTO campaign_logs (id, campaign_id, event_type, message, user_id, created_at)
-         VALUES (?, ?, 'created', ?, ?, NOW())`,
-        [uuidv4(), campaignId, logMessage, data.user_id]
-      );
-
-      await connection.commit();
-
-      logger.info('Campaign created', {
-        campaignId,
-        recipientCount: validatedRecipients.length,
-        invalidCount: invalidNumbers.length,
-        tenantId: data.tenant_id,
-      });
-
-      // Fetch and return the created campaign
-      const campaign = await queryOne<Campaign>(
-        `SELECT c.*, t.name as template_name, t.template_code
-         FROM campaigns c
-         LEFT JOIN message_templates t ON c.template_id = t.id
-         WHERE c.id = ?`,
-        [campaignId]
-      );
-
-      return campaign!;
-    } catch (error) {
-      await connection.rollback();
-      logger.error('Failed to create campaign', { error, data });
-      throw error;
-    } finally {
-      connection.release();
     }
-  }
+
 
   // Get campaigns with pagination
   async getCampaigns(
@@ -267,7 +323,7 @@ export class CampaignService {
   // Get campaign stats using stored procedure
   async getCampaignStats(tenant_id: string): Promise<any> {
     const result = await query<any[]>('CALL sp_get_campaign_stats(?)', [tenant_id]);
-    return result[0][0]; // First result set, first row
+    return result[0][0];
   }
 
   // Get campaign by ID
@@ -544,105 +600,130 @@ export class CampaignService {
       variables?: Record<string, any>;
     }>
   ): Promise<void> {
-      const connection = await getConnection();
+    const connection = await getConnection();
 
-      try {
-        await connection.beginTransaction();
+    try {
+      await connection.beginTransaction();
 
-        // Verify campaign exists and is in draft/paused status
-        const campaign = await queryOne<any>(
-          `SELECT id, status FROM campaigns 
-          WHERE id = ? AND tenant_id = ? AND status IN ('draft', 'paused')`,
-          [campaign_id, tenant_id]
-        );
+      // Verify campaign exists and get template variables
+      const campaign = await queryOne<any>(
+        `SELECT id, status, template_variables FROM campaigns 
+         WHERE id = ? AND tenant_id = ? AND status IN ('draft', 'paused')`,
+        [campaign_id, tenant_id]
+      );
 
-        if (!campaign) {
-          throw new Error('Campaign not found or cannot add recipients');
-        }
-
-        // ✅ Validate and format all phone numbers
-        const validatedRecipients: Array<{
-          phone_number: string;
-          customer_id?: string;
-          variables: Record<string, any>;
-        }> = [];
-        const invalidNumbers: Array<{ phone: string; error: string }> = [];
-
-        for (const recipient of recipients) {
-          const validation = PhoneNumberValidator.validate(recipient.phone_number);
-          
-          if (validation.isValid) {
-            validatedRecipients.push({
-              phone_number: validation.formatted, // ✅ Use formatted number
-              customer_id: recipient.customer_id,
-              variables: recipient.variables || {},
-            });
-          } else {
-            invalidNumbers.push({
-              phone: recipient.phone_number,
-              error: validation.error || 'Invalid format',
-            });
-          }
-        }
-
-        if (validatedRecipients.length === 0) {
-          throw new Error('No valid phone numbers to add');
-        }
-
-        // ✅ Add VALIDATED recipients
-        const recipientValues = validatedRecipients.map(() => '(?, ?, ?, ?, ?)').join(', ');
-        const recipientParams = validatedRecipients.flatMap((r) => [
-          uuidv4(),
-          campaign_id,
-          r.phone_number, // ✅ Already formatted
-          r.customer_id || null,
-          JSON.stringify(r.variables || {}),
-        ]);
-
-        await connection.query(
-          `INSERT INTO campaign_recipients (id, campaign_id, phone_number, customer_id, variables)
-          VALUES ${recipientValues}
-          ON DUPLICATE KEY UPDATE updated_at = NOW()`,
-          recipientParams
-        );
-
-        // Update campaign counts
-        await connection.query(
-          `UPDATE campaigns 
-          SET 
-            total_recipients = total_recipients + ?,
-            pending_count = pending_count + ?,
-            updated_at = NOW()
-          WHERE id = ?`,
-          [validatedRecipients.length, validatedRecipients.length, campaign_id]
-        );
-
-        // ✅ Log event with validation info
-        const logMessage = invalidNumbers.length > 0
-          ? `Added ${validatedRecipients.length} recipients (${invalidNumbers.length} invalid numbers skipped)`
-          : `Added ${validatedRecipients.length} recipients`;
-
-        await connection.query(
-          `INSERT INTO campaign_logs (id, campaign_id, event_type, message, user_id, created_at)
-          VALUES (?, ?, 'recipient_added', ?, ?, NOW())`,
-          [uuidv4(), campaign_id, logMessage, user_id]
-        );
-
-        await connection.commit();
-
-        logger.info('Recipients added to campaign', {
-          campaign_id,
-          validCount: validatedRecipients.length,
-          invalidCount: invalidNumbers.length,
-        });
-      } catch (error) {
-        await connection.rollback();
-        logger.error('Failed to add recipients', { error, campaign_id });
-        throw error;
-      } finally {
-        connection.release();
+      if (!campaign) {
+        throw new Error('Campaign not found or cannot add recipients');
       }
+
+      // Parse template variables if they exist
+      let templateVars = null;
+      if (campaign.template_variables) {
+        try {
+          templateVars = JSON.parse(campaign.template_variables);
+        } catch (e) {
+          templateVars = campaign.template_variables;
+        }
+      }
+
+      // ✅ Validate and format all phone numbers
+      const validatedRecipients: Array<{
+        phone_number: string;
+        customer_id?: string;
+        variables: Record<string, any>;
+      }> = [];
+      const invalidNumbers: Array<{ phone: string; error: string }> = [];
+
+      for (const recipient of recipients) {
+        const validation = PhoneNumberValidator.validate(recipient.phone_number);
+        
+        if (validation.isValid) {
+          // ✅ Validate recipient has all required template variables
+          if (templateVars?.body) {
+            const requiredParams = templateVars.body.map((p: any) => p.name);
+            const providedParams = Object.keys(recipient.variables || {});
+            const missing = requiredParams.filter((p: string) => !providedParams.includes(p));
+
+            if (missing.length > 0) {
+              invalidNumbers.push({
+                phone: recipient.phone_number,
+                error: `Missing variables: ${missing.join(', ')}`,
+              });
+              continue;
+            }
+          }
+
+          validatedRecipients.push({
+            phone_number: validation.formatted,
+            customer_id: recipient.customer_id,
+            variables: recipient.variables || {},
+          });
+        } else {
+          invalidNumbers.push({
+            phone: recipient.phone_number,
+            error: validation.error || 'Invalid format',
+          });
+        }
+      }
+
+      if (validatedRecipients.length === 0) {
+        throw new Error('No valid phone numbers to add');
+      }
+
+      // ✅ Add VALIDATED recipients
+      const recipientValues = validatedRecipients.map(() => '(?, ?, ?, ?, ?)').join(', ');
+      const recipientParams = validatedRecipients.flatMap((r) => [
+        uuidv4(),
+        campaign_id,
+        r.phone_number,
+        r.customer_id || null,
+        JSON.stringify(r.variables || {}),
+      ]);
+
+      await connection.query(
+        `INSERT INTO campaign_recipients (id, campaign_id, phone_number, customer_id, variables)
+         VALUES ${recipientValues}
+         ON DUPLICATE KEY UPDATE updated_at = NOW()`,
+        recipientParams
+      );
+
+      // Update campaign counts
+      await connection.query(
+        `UPDATE campaigns 
+         SET 
+           total_recipients = total_recipients + ?,
+           pending_count = pending_count + ?,
+           updated_at = NOW()
+         WHERE id = ?`,
+        [validatedRecipients.length, validatedRecipients.length, campaign_id]
+      );
+
+      // ✅ Log event with validation info
+      const logMessage = invalidNumbers.length > 0
+        ? `Added ${validatedRecipients.length} recipients (${invalidNumbers.length} invalid numbers skipped)`
+        : `Added ${validatedRecipients.length} recipients`;
+
+      await connection.query(
+        `INSERT INTO campaign_logs (id, campaign_id, event_type, message, user_id, created_at)
+         VALUES (?, ?, 'recipient_added', ?, ?, NOW())`,
+        [uuidv4(), campaign_id, logMessage, user_id]
+      );
+
+      await connection.commit();
+
+      logger.info('Recipients added to campaign', {
+        campaign_id,
+        validCount: validatedRecipients.length,
+        invalidCount: invalidNumbers.length,
+      });
+    } catch (error) {
+      await connection.rollback();
+      logger.error('Failed to add recipients', { error, campaign_id });
+      throw error;
+    } finally {
+      connection.release();
     }
+  }
 
   // Create analytics snapshot
   async createAnalyticsSnapshot(campaign_id: string): Promise<void> {
